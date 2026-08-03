@@ -1,0 +1,18 @@
+# local venv / caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# test fixtures are rebuilt from Zenodo by make_fixtures.py
+fixtures/
+
+# working state — belongs under --root, never in the repo
+manifest.sqlite
+manifest.sqlite-journal
+archives/
+staging/
+locks/
+logs/
+*.zip
+*.zip.part
