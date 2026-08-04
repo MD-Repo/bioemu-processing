@@ -288,12 +288,12 @@ PROTOCOL_SUMMARY = {
 PAPER_BIOEMU = {
     "title": "Scalable emulation of protein equilibrium ensembles with generative deep learning",
     "authors": (
-        "Sarah Lewis, Tim Hempel, Jose Jimenez-Luna, Michael Gastegger, Yu Xie, "
-        "Andrew Y. K. Foong, Victor Garcia Satorras, Osama Abdin, Bastiaan S. Veeling, "
+        "Sarah Lewis, Tim Hempel, José Jiménez-Luna, Michael Gastegger, Yu Xie, "
+        "Andrew Y. K. Foong, Victor García Satorras, Osama Abdin, Bastiaan S. Veeling, "
         "Iryna Zaporozhets, Yaoyi Chen, Soojung Yang, Adam E. Foster, Arne Schneuing, "
         "Jigyasa Nigam, Federico Barbero, Vincent Stimper, Andrew Campbell, Jason Yim, "
         "Marten Lienen, Yu Shi, Shuxin Zheng, Hannes Schulz, Usman Munir, "
-        "Roberto Sordillo, Ryota Tomioka, Cecilia Clementi, Frank Noe"
+        "Roberto Sordillo, Ryota Tomioka, Cecilia Clementi, Frank Noé"
     ),
     "journal": "Science",
     "year": 2025,
@@ -318,20 +318,62 @@ PAPER_MEGASCALE = {
     "doi": "10.1038/s41586-023-06328-6",
 }
 
-# NOT PUBLISHED: no ORCIDs accompany the dataset release. `lead_contributor_orcid`
-# is required by the spec; this placeholder matches the sibling importers and
-# means "submitted locally as administrator". [[contributors]].orcid is optional,
-# so it is omitted rather than filled with a placeholder.
+# `lead_contributor_orcid` is required by the spec; this placeholder matches the
+# sibling importers and means "submitted locally as administrator". It is
+# deliberately NOT one of the author ORCIDs below: the lead contributor is
+# whoever submits the deposition, not an author of the paper.
 LEAD_CONTRIBUTOR_ORCID = "0000-0000-0000-0000"
 MSR_AI4SCIENCE = "Microsoft Research AI for Science"
+
+# The full BioEmu author list, in manuscript order, so credit in the deposition
+# matches credit in the paper — the names here are kept byte-identical to
+# PAPER_BIOEMU["authors"] above, and a test enforces that.
+#
+# Names carry their diacritics (José Jiménez-Luna, Victor García Satorras,
+# Frank Noé, Freie Universität), so this module emits non-ASCII text: every
+# write of rendered metadata must name encoding="utf-8" rather than inherit the
+# locale's, or a C/POSIX-locale VM raises UnicodeEncodeError. TOML is UTF-8 by
+# spec, so this is also what a reader expects.
+#
+# `orcid` is optional and is present only for the 8 authors whose ORCID has been
+# checked against their public profile; the release itself publishes no ORCIDs,
+# so the remaining 20 carry a name alone rather than a guessed or placeholder id.
+# `institution` is likewise recorded only where it is known from the dataset
+# release (the four original contacts) — the manuscript's affiliations were not
+# transcribed, and an unverified affiliation is worse than none.
 CONTRIBUTORS = [
-    {"name": "Sarah Lewis", "institution": MSR_AI4SCIENCE},
-    {"name": "Tim Hempel", "institution": MSR_AI4SCIENCE,
-     "email": "timhempel@microsoft.com"},
-    {"name": "Cecilia Clementi",
-     "institution": "Freie Universitaet Berlin, Department of Physics"},
-    {"name": "Frank Noe", "institution": MSR_AI4SCIENCE,
-     "email": "franknoe@microsoft.com"},
+    {"name": "Sarah Lewis", "orcid": "0009-0009-6484-0352",
+     "institution": MSR_AI4SCIENCE},
+    {"name": "Tim Hempel", "orcid": "0000-0002-0073-9353",
+     "email": "timhempel@microsoft.com", "institution": MSR_AI4SCIENCE},
+    {"name": "José Jiménez-Luna", "orcid": "0000-0002-5335-7834"},
+    {"name": "Michael Gastegger", "orcid": "0000-0001-7954-3275"},
+    {"name": "Yu Xie", "orcid": "0000-0002-0088-5123"},
+    {"name": "Andrew Y. K. Foong"},
+    {"name": "Victor García Satorras"},
+    {"name": "Osama Abdin", "orcid": "0000-0002-5471-2906"},
+    {"name": "Bastiaan S. Veeling"},
+    {"name": "Iryna Zaporozhets"},
+    {"name": "Yaoyi Chen"},
+    {"name": "Soojung Yang"},
+    {"name": "Adam E. Foster"},
+    {"name": "Arne Schneuing"},
+    {"name": "Jigyasa Nigam"},
+    {"name": "Federico Barbero"},
+    {"name": "Vincent Stimper"},
+    {"name": "Andrew Campbell"},
+    {"name": "Jason Yim"},
+    {"name": "Marten Lienen"},
+    {"name": "Yu Shi"},
+    {"name": "Shuxin Zheng"},
+    {"name": "Hannes Schulz"},
+    {"name": "Usman Munir"},
+    {"name": "Roberto Sordillo"},
+    {"name": "Ryota Tomioka"},
+    {"name": "Cecilia Clementi", "orcid": "0000-0001-9221-2358",
+     "institution": "Freie Universität Berlin, Department of Physics"},
+    {"name": "Frank Noé", "orcid": "0000-0003-4169-9324",
+     "email": "franknoe@microsoft.com", "institution": MSR_AI4SCIENCE},
 ]
 
 # Deposit the MegaSim seed structure alongside the trajectory topology. Flip to
@@ -1448,6 +1490,8 @@ def render_metadata(ds: Dataset, system: str, group: Group, ids: SystemIds,
     for c in CONTRIBUTORS:
         lines.append("[[contributors]]")
         lines.append(f"name = {toml_str(c['name'])}")
+        if c.get("orcid"):
+            lines.append(f"orcid = {toml_str(c['orcid'])}")
         if c.get("email"):
             lines.append(f"email = {toml_str(c['email'])}")
         if c.get("institution"):
@@ -1552,7 +1596,9 @@ def build_sim_dir(zf: zipfile.ZipFile, ds: Dataset, sf: SystemFiles, group: Grou
         pdb_name=pdb_name, psf_name=psf_name, n_atoms=n_pdb_atoms,
         n_frames=total_frames, reference_name=reference_name, dropped=dropped,
     )
-    (sim_dir / "mdrepo-metadata.toml").write_text(meta)
+    # encoding is explicit: contributor names carry diacritics, and the locale
+    # default is ASCII under LANG=C. TOML is UTF-8 by spec regardless.
+    (sim_dir / "mdrepo-metadata.toml").write_text(meta, encoding="utf-8")
     return BuiltSim(sim_dir=sim_dir, group=group, n_trajs=len(traj_names),
                     n_frames=total_frames, dropped=dropped)
 

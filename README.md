@@ -272,9 +272,27 @@ padding. Equilibration 0.2 ns NVT + 0.6 ns NPT at 295 K / 1 bar, Langevin, 4 fs.
   per-system solvent density, and the field is required once `[water]` is
   present.
 - **⚠ `lead_contributor_orcid = "0000-0000-0000-0000"`** — the placeholder used
-  by the sibling importers, meaning "submitted locally as administrator". The
-  release publishes no ORCIDs; `[[contributors]].orcid` is optional and is
-  therefore omitted rather than faked.
+  by the sibling importers, meaning "submitted locally as administrator". It is
+  deliberately not one of the author ORCIDs: the lead contributor is whoever
+  submits the deposition, not an author of the paper.
+- **`[[contributors]]` is the full 28-author list, in manuscript order**, so
+  credit in the deposition matches credit in the paper. `orcid` is optional and
+  is recorded for the 8 authors whose ORCID has been checked against their
+  public profile (Lewis, Hempel, Jimenez-Luna, Gastegger, Xie, Abdin, Clementi,
+  Noe); the release itself publishes no ORCIDs, so the other 20 carry a name
+  alone rather than a guessed id. `institution` is likewise kept only for the
+  four original dataset contacts — the manuscript affiliations were not
+  transcribed, and an unverified affiliation is worse than none.
+- **Names carry their diacritics** (`José Jiménez-Luna`, `Victor García
+  Satorras`, `Frank Noé`, `Freie Universität`), in `[[contributors]]` and in the
+  citation string alike; a test pins the two to each other. This means the
+  emitted TOML is non-ASCII, so `mdrepo-metadata.toml` is written with an
+  explicit `encoding="utf-8"` — inheriting the locale's encoding would raise
+  `UnicodeEncodeError` on a VM running under `LANG=C`. TOML is UTF-8 by spec, so
+  `mdr-process` should be reading it that way regardless. **⚠ If `mdr-process
+  validate` turns out to choke on non-ASCII contributor names, transliterate
+  `CONTRIBUTORS` and `PAPER_BIOEMU["authors"]` together** — they are asserted
+  equal, so changing one alone fails the suite.
 - **IDs.** `cath1`/`cath2` system names embed a CATH domain
   (`cath1_1b43A02` → PDB `1b43`, chain `A`), so UniProt comes from SIFTS for
   that exact chain. `opep` peptides are synthetic and get neither field —

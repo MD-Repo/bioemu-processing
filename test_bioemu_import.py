@@ -12,6 +12,9 @@ against the actual byte layouts rather than synthetic stand-ins. Build them with
 from __future__ import annotations
 
 import os
+import re
+import subprocess
+import sys
 import tomllib
 import zipfile
 from pathlib import Path
@@ -233,6 +236,60 @@ def test_rendered_metadata_is_valid_toml_with_required_keys():
     assert meta["structure_file_name"].endswith(".pdb")
 
 
+def _orcid_checksum_ok(orcid: str) -> bool:
+    """ISO 7064 MOD 11-2, the check-digit scheme ORCID uses."""
+    digits = orcid.replace("-", "")
+    total = 0
+    for ch in digits[:15]:
+        total = (total + int(ch)) * 2
+    remainder = (12 - total % 11) % 11
+    return ("X" if remainder == 10 else str(remainder)) == digits[15]
+
+
+def test_contributors_are_the_paper_authors_in_order():
+    # Credit in the deposition must match credit in the paper; a name that drifts
+    # out of sync with the citation string is a provenance bug, not a typo.
+    authors = [a.strip() for a in bi.PAPER_BIOEMU["authors"].split(",")]
+    assert [c["name"] for c in bi.CONTRIBUTORS] == authors
+
+
+def test_contributor_orcids_are_well_formed():
+    with_orcid = [c for c in bi.CONTRIBUTORS if c.get("orcid")]
+    assert len(with_orcid) == 8, "the 8 validated ORCIDs should all be present"
+    for c in with_orcid:
+        orcid = c["orcid"]
+        assert re.fullmatch(r"\d{4}-\d{4}-\d{4}-\d{3}[\dX]", orcid), c["name"]
+        assert _orcid_checksum_ok(orcid), f"{c['name']}: bad check digit {orcid}"
+        assert orcid != bi.LEAD_CONTRIBUTOR_ORCID
+
+
+def test_accented_contributor_names_survive_rendering():
+    # The names are non-ASCII on purpose; this pins that they reach the TOML
+    # intact rather than being stripped, mangled, or escaped into \u sequences.
+    text = bi.render_metadata(
+        bi.DATASETS["cath1"], "cath1_1b43A02",
+        bi.Group(slug="ff99sb-ildn-300k", force_field="amber ff99sb-ildn",
+                 temperature_k=300, save_traj_ns=10.0, trajs=["trajs/a.xtc"]),
+        bi.parse_system_ids(bi.DATASETS["cath1"], "cath1_1b43A02"), [],
+        traj_names=["a.xtc"], pdb_name="x.pdb", psf_name="x.psf",
+        n_atoms=1002, n_frames=251)
+    for name in ("José Jiménez-Luna", "Victor García Satorras", "Frank Noé",
+                 "Freie Universität Berlin, Department of Physics"):
+        assert name in text
+    names = [c["name"] for c in tomllib.loads(text)["contributors"]]
+    assert "Frank Noé" in names
+
+
+def test_rendered_contributors_carry_names_and_orcids():
+    meta = _render("cath1", "cath1_1b43A02")
+    rendered = meta["contributors"]
+    assert [c["name"] for c in rendered] == [c["name"] for c in bi.CONTRIBUTORS]
+    for got, want in zip(rendered, bi.CONTRIBUTORS):
+        assert got.get("orcid") == want.get("orcid"), want["name"]
+        # Optional fields are omitted, never emitted empty or placeholdered.
+        assert "orcid" in got or "orcid" not in want
+
+
 def test_temperature_and_timestep_are_in_spec_range():
     meta = _render("cath1", "cath1_1b43A02")
     assert 275 <= meta["temperature_kelvin"] <= 700
@@ -380,7 +437,7 @@ def test_build_sim_dir_produces_a_complete_in_dir(tmp_path):
     assert "cath1_1b43A02.psf" in names          # generated, not shipped
     assert built.n_trajs == 2 and built.n_frames == 251
 
-    meta = tomllib.loads((d / "mdrepo-metadata.toml").read_text())
+    meta = tomllib.loads((d / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
     # Every file the metadata names must actually be in the directory.
     for key in ("structure_file_name", "topology_file_name"):
         assert (d / meta[key]).is_file()
@@ -406,7 +463,7 @@ def test_generated_psf_atom_count_matches_the_pdb(tmp_path):
 
 def test_reference_pdb_is_deposited_as_an_additional_file(tmp_path):
     built, _ = _build("MSR_megasim_merge.zip", "megamerge", "1AOY", tmp_path)
-    meta = tomllib.loads((built.sim_dir / "mdrepo-metadata.toml").read_text())
+    meta = tomllib.loads((built.sim_dir / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
     extra = meta["additional_files"]
     assert [f["file_name"] for f in extra] == ["1AOY_reference.pdb"]
     assert (built.sim_dir / "1AOY_reference.pdb").is_file()
@@ -414,8 +471,42 @@ def test_reference_pdb_is_deposited_as_an_additional_file(tmp_path):
 
 def test_cath_in_dir_has_no_additional_files(tmp_path):
     built, _ = _build("ONE_cath1.zip", "cath1", "cath1_1b43A02", tmp_path)
-    meta = tomllib.loads((built.sim_dir / "mdrepo-metadata.toml").read_text())
+    meta = tomllib.loads((built.sim_dir / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
     assert "additional_files" not in meta
+
+
+def test_metadata_is_written_utf8_under_an_ascii_locale(tmp_path):
+    """The real write path, exercised under LANG=C.
+
+    Contributor names carry diacritics, so a `write_text` that inherits the
+    locale encoding raises UnicodeEncodeError on a POSIX-locale VM — which is
+    where this importer runs. Forked rather than monkeypatched because the
+    locale encoding is resolved below Python.
+    """
+    out = tmp_path / "out"
+    script = (
+        "import sys, zipfile, pathlib\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import bioemu_import as bi\n"
+        "ds = bi.DATASETS['cath1']\n"
+        "with zipfile.ZipFile(sys.argv[2]) as zf:\n"
+        "    sf = bi.index_archive(zf, ds)['cath1_1b43A02']\n"
+        "    g = bi.discover_groups(zf, sf)[0]\n"
+        "    ids = bi.parse_system_ids(ds, 'cath1_1b43A02')\n"
+        "    bi.build_sim_dir(zf, ds, sf, g, ids, [], pathlib.Path(sys.argv[3]))\n"
+    )
+    env = {**os.environ, "LANG": "C", "LC_ALL": "C", "PYTHONUTF8": "0",
+           "PYTHONCOERCECLOCALE": "0"}
+    proc = subprocess.run(
+        [sys.executable, "-c", script, str(Path(bi.__file__).parent),
+         str(FIXTURES / "ONE_cath1.zip"), str(out)],
+        env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+    raw = (out / "mdrepo-metadata.toml").read_bytes()
+    assert "Frank Noé".encode("utf-8") in raw
+    names = [c["name"] for c in tomllib.loads(raw.decode("utf-8"))["contributors"]]
+    assert names == [c["name"] for c in bi.CONTRIBUTORS]
 
 
 def test_each_forcefield_group_becomes_its_own_in_dir(tmp_path):
@@ -428,7 +519,7 @@ def test_each_forcefield_group_becomes_its_own_in_dir(tmp_path):
         for g in groups:
             built = bi.build_sim_dir(zf, ds, sf, g, ids, [], tmp_path / g.slug)
             metas[g.slug] = tomllib.loads(
-                (built.sim_dir / "mdrepo-metadata.toml").read_text())
+                (built.sim_dir / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
     assert metas["ff14sb-295k"]["forcefield"] == "Amber ff14SB"
     assert metas["ff99sb-disp-295k"]["forcefield"] == "Amber a99SB-disp"
     # No trajectory may appear in both simulations.
@@ -456,7 +547,7 @@ def test_unreadable_and_mismatched_trajectories_are_dropped_not_fatal(tmp_path):
     kinds = {k for k, _ in notes}
     assert "unreadable-trajectory" in kinds and "atom-count-mismatch" in kinds
 
-    meta = tomllib.loads((built.sim_dir / "mdrepo-metadata.toml").read_text())
+    meta = tomllib.loads((built.sim_dir / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
     assert meta["trajectory_file_names"] == ["good.xtc"]
 
 
