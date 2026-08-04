@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import struct
 import subprocess
 import sys
 import tomllib
@@ -165,6 +166,63 @@ def _extract(zf, member, tmp_path) -> Path:
     dest = tmp_path / member.rsplit("/", 1)[-1]
     dest.write_bytes(zf.read(member))
     return dest
+
+
+def _synth_xtc(path: Path, times, n_atoms: int = 3) -> Path:
+    """A minimal but real xtc with the given frame times.
+
+    Kept at <=9 atoms so coordinates take the uncompressed raw-float path,
+    which lets the time series be dictated exactly without a compressor.
+    """
+    buf = bytearray()
+    for step, t in enumerate(times):
+        buf += struct.pack(">iiif", bi.XTC_MAGIC, n_atoms, step, t)
+        buf += struct.pack(">9f", *([0.0] * 9))          # 3x3 box
+        buf += struct.pack(">i", n_atoms)
+        buf += struct.pack(f">{n_atoms * 3}f", *([0.0] * (n_atoms * 3)))
+    path.write_bytes(bytes(buf))
+    return path
+
+
+def test_xtc_scan_reports_modal_not_mean_spacing(tmp_path):
+    """An aggregated trajectory restarts its clock at each segment boundary.
+
+    Every frame pair inside a segment is 10000 ps apart, so that is the file's
+    real sampling interval; the mean over first..last would report 60 ps here,
+    which is what the cath1 warnings were made of.
+    """
+    times = ([i * 10000.0 for i in range(300)]          # segment 1
+             + [i * 10000.0 for i in range(198)]        # clock restarts
+             + [i * 10000.0 for i in range(3)])         # short tail
+    info = bi.xtc_scan(_synth_xtc(tmp_path / "aggregated.xtc", times))
+    assert info.n_frames == 501
+    assert info.ps_per_frame == 10000.0
+    # The estimator this replaced; pinned so the regression can't come back.
+    assert (times[-1] - times[0]) / (len(times) - 1) == pytest.approx(40.0)
+
+
+def test_xtc_scan_ignores_duplicate_timestamps(tmp_path):
+    times = [0.0, 10000.0, 10000.0, 20000.0, 30000.0, 30000.0, 40000.0]
+    info = bi.xtc_scan(_synth_xtc(tmp_path / "dupes.xtc", times))
+    assert info.ps_per_frame == 10000.0
+
+
+def test_modal_dt_tolerates_float32_jitter():
+    # float32 cannot hold 2 us exactly to the ps, so nominally equal gaps differ
+    # slightly; they must still land in one bucket rather than fragmenting.
+    gaps = [10000.0, 10000.25, 9999.75, 10000.125, 10000.0, 9999.875]
+    assert bi.modal_dt(gaps) == pytest.approx(10000.0, abs=0.5)
+
+
+def test_modal_dt_is_none_without_a_positive_gap():
+    assert bi.modal_dt([]) is None                 # single-frame file
+    assert bi.modal_dt([0.0, -5.0, 0.0]) is None   # nothing but restarts
+
+
+def test_modal_dt_survives_a_minority_of_real_spacings():
+    # A genuinely mis-declared file must still be caught: if most gaps are 500,
+    # 500 is the answer, not the 10000 that a handful of frames happen to show.
+    assert bi.modal_dt([500.0] * 20 + [10000.0] * 3) == 500.0
 
 
 def test_xtc_scan_reads_real_frame_headers(tmp_path):

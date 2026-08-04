@@ -79,9 +79,20 @@ produce; dropping the minority would discard released data.
 ### Trajectories are deposited byte-for-byte
 
 Unlike the mdCATH and Dynamic PDB importers, **nothing is re-encoded**. The
-published XTCs already carry correct frame times — verified as 10,000 ps/frame,
-matching `save_traj_ns: 10.0` — so `mdr-process` measures the sampling interval
-correctly from the files as shipped.
+published XTCs carry correct frame times — 10,000 ps between consecutive frames,
+matching `save_traj_ns: 10.0`.
+
+**⚠ Some released trajectories are aggregates whose clock restarts.** A file's
+frame times are not necessarily monotonic: several cath1 trajectories are
+concatenations of shorter segments, and the time field returns to ~0 at each
+boundary. The spacing *within* a segment is still 10,000 ps, so the sampling
+interval is what `dataset.json` claims — but any estimator of the form
+`(last_t - first_t) / (n_frames - 1)` reads the restarts as a much shorter
+interval (`cath1_1b43A02/run006` yields 60 ps that way). This importer therefore
+takes the **modal positive gap between consecutive frames**, which ignores the
+boundaries; see `modal_dt()`. **If `mdr-process` derives sampling the naive way,
+it will mis-measure these files** — worth checking on the VM against a system
+that logs no `frame-spacing-mismatch` note but is known to be an aggregate.
 
 That also means mdtraj's silent xdrfile-overflow failure mode (which
 `mdcath_import.py` has to guard against, and re-audit with a `scan` subcommand)

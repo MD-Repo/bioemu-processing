@@ -77,12 +77,14 @@ import io
 import json
 import errno
 import logging
+import math
 import multiprocessing as mp
 import os
 import re
 import shutil
 import signal
 import sqlite3
+import statistics
 import struct
 import subprocess
 import sys
@@ -1172,11 +1174,40 @@ class XtcInfo:
     ps_per_frame: Optional[float]     # None when the file holds a single frame
 
 
+def modal_dt(diffs: list[float]) -> Optional[float]:
+    """The most common positive gap between consecutive frame times.
+
+    NOT the mean. Some released trajectories are aggregates of several shorter
+    segments, and the frame time restarts at each segment boundary, so
+    (last - first) / (n - 1) badly understates the real spacing: cath1_1b43A02's
+    run006 reports 60 ps that way against a true 10000 ps, because only the final
+    3-frame segment survives the subtraction. Taking the mode over consecutive
+    gaps and ignoring the non-positive ones drops the boundaries on the floor and
+    recovers the spacing that actually holds within a segment.
+
+    Gaps are bucketed at 4 significant digits before counting: frame times are
+    float32, so at multi-microsecond timestamps two nominally identical gaps can
+    differ by a fraction of a ps (the ULP at t=2 us is 0.125). That jitter would
+    otherwise split one spacing across several buckets. 4 digits is far finer
+    than the 1% tolerance the caller compares against. The median of the winning
+    bucket is returned so the result is a real observed gap, not a rounded one.
+    """
+    positive = [d for d in diffs if d > 0]
+    if not positive:
+        return None
+    buckets: dict[float, list[float]] = {}
+    for d in positive:
+        key = round(d, 3 - math.floor(math.log10(d)))
+        buckets.setdefault(key, []).append(d)
+    return statistics.median(max(buckets.values(), key=len))
+
+
 def xtc_scan(path: Path) -> XtcInfo:
     """Walk every frame header of an xtc. Raises BadTrajectoryError on garbage."""
     n_atoms = None
     n_frames = 0
-    first_t = last_t = None
+    prev_t = None
+    diffs: list[float] = []
     size = path.stat().st_size
     with open(path, "rb") as fh:
         while True:
@@ -1221,15 +1252,15 @@ def xtc_scan(path: Path) -> XtcInfo:
                 fh.seek(nbytes + ((4 - nbytes % 4) % 4), os.SEEK_CUR)
             if fh.tell() > size:
                 raise BadTrajectoryError(f"{path.name}: truncated at frame {n_frames}")
-            if first_t is None:
-                first_t = t
-            last_t = t
+            if prev_t is not None:
+                diffs.append(t - prev_t)
+            prev_t = t
             n_frames += 1
 
     if not n_frames or n_atoms is None:
         raise BadTrajectoryError(f"{path.name}: no readable frames")
-    dt = ((last_t - first_t) / (n_frames - 1)) if n_frames > 1 else None
-    return XtcInfo(n_atoms=n_atoms, n_frames=n_frames, ps_per_frame=dt)
+    return XtcInfo(n_atoms=n_atoms, n_frames=n_frames,
+                   ps_per_frame=modal_dt(diffs))
 
 
 def pdb_atom_count(path: Path) -> int:
@@ -1574,6 +1605,10 @@ def build_sim_dir(zf: zipfile.ZipFile, ds: Dataset, sf: SystemFiles, group: Grou
         # The published frame spacing should match dataset.json. MDRepo derives
         # sampling from the file itself, so a disagreement is recorded rather
         # than corrected — the file is the authority, dataset.json is the claim.
+        # The spacing compared here is the modal gap between consecutive frames,
+        # not the mean: aggregated trajectories restart their clock at each
+        # segment boundary, and a mean over first..last reads those restarts as
+        # a shorter spacing than any frame pair in the file actually has.
         if info.ps_per_frame is not None and group.save_traj_ns:
             expected = group.save_traj_ns * 1000.0
             if abs(info.ps_per_frame - expected) > max(1.0, 0.01 * expected):
