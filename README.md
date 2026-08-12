@@ -1,8 +1,9 @@
 # BioEmu → MDRepo import
 
 Download the [BioEmu MD dataset release](https://github.com/microsoft/bioemu)
-(Lewis et al., *Science* **389**, eadv9817, 2025) from Zenodo and import every
-system into MDRepo via `mdr-process`.
+(Lewis et al., *Science* **389**, eadv9817, 2025) from Zenodo and import it into
+MDRepo via `mdr-process`. Four of the release's five archives are in scope;
+**`opep` is deliberately not imported** — see [Scope](#scope).
 
 This is the sibling of `mdcath_import.py` (whose unit was a 5-replica
 `(domain, temperature)` group) and `dynamicpdb_import.py` (one trajectory per
@@ -12,16 +13,16 @@ sharing a force field and temperature.
 
 ## What gets imported
 
-Five zip archives across three Zenodo records, **41 GB compressed**:
+Four zip archives across three Zenodo records, **39.5 GB compressed**:
 
 | Dataset | Archive | Size | Systems | Trajectories | Force field / T | Simulations |
 |---|---|---:|---:|---:|---|---:|
-| `opep` | `ONE_octapeptides.zip` | 0.5 GB | 1100 | 118,252 | ff99SB-ILDN / 300 K | 1100 |
 | `megamerge` | `MSR_megasim_merge.zip` | 1.3 GB | 271 | 3,789 | **mixed** / 295 K | **348** |
 | `cath1` | `ONE_cath1.zip` | 2.1 GB | 50 | 1,248 | ff99SB-ILDN / 300 K | 50 |
 | `megamut` | `MSR_megasim_mutants_disp_allatom.zip` | 8.4 GB | 21,458 | 21,458 | a99SB-disp / 295 K | 21,458 |
 | `cath2` | `MSR_cath2.zip` | 27.7 GB | 1,043 | 40,984 | ff99SB-ILDN / 300 K | **1,040** |
-| | | **41 GB** | **23,922** | **185,731** | | **23,996** |
+| | | **39.5 GB** | **22,822** | **67,479** | | **22,896** |
+| ~~`opep`~~ | ~~`ONE_octapeptides.zip`~~ | 0.5 GB | 1100 | 118,252 | ff99SB-ILDN / 300 K | *out of scope* |
 
 Two counts differ from the system count, and both are properties of the release:
 
@@ -30,6 +31,36 @@ Two counts differ from the system count, and both are properties of the release:
   `topology.pdb` but no trajectories. They are recorded as `skipped`, not
   failed. 1,040 is also the number the manuscript reports (Table S1).
 - **`megamerge`: 271 → 348.** 77 wild-types mix two force fields (see below).
+
+## Scope
+
+**`opep` (ONE-octapeptides) is not imported.** The decision is about what the
+data is worth to us, not about any defect in it:
+
+- The systems are 8-residue peptides — 113 to 146 atoms, solvent stripped.
+- Of its 118,252 trajectories, **112,756 (95.4%) hold exactly two frames**,
+  a single 10 ns gap each. They contribute 2.26 ms of the archive's 8.06 ms but
+  carry almost no continuous dynamics.
+- The continuous sampling is only the 5,496 `runNNN_protein.cmprsd.xtc` files,
+  five per system at 1-2 us each.
+
+Short peptides sampled in us-scale fragments are not what this deposition is
+for, so the archive is left out rather than deposited for completeness.
+
+**The tool still supports it in full** — `opep` remains in `DATASETS`, and
+`run --datasets opep` imports it correctly, including the frame-stamp handling
+described below. Nothing is disabled; the dataset is simply not part of the
+planned import. If it is ever wanted, everything needed is already here and
+tested.
+
+Practical consequences:
+
+- `init` still builds a work-list covering all 23,922 systems. The 1,100 `opep`
+  rows stay `pending` for good and show in `status` totals. Pass
+  `init --datasets megamerge,cath1,megamut,cath2` to leave them out entirely.
+- A plain `run` with no `--datasets` **would** import `opep` first, since it is
+  the smallest archive. Always name the four, or run `init` without `opep` so
+  there is nothing pending for it.
 
 ## Per-system source layout
 
@@ -46,7 +77,7 @@ $ZIP_ROOT/$SYSTEM/
 
 `run` processes **one archive at a time, smallest first**, and deletes it once
 its systems are drained — so peak disk is one zip (28 GB worst case, for
-`cath2`) plus one IN_DIR per worker, never the whole 41 GB.
+`cath2`) plus one IN_DIR per worker, never the whole 39.5 GB.
 
 For each system a worker:
 
@@ -94,6 +125,33 @@ boundaries; see `modal_dt()`. **If `mdr-process` derives sampling the naive way,
 it will mis-measure these files** — worth checking on the VM against a system
 that logs no `frame-spacing-mismatch` note but is known to be an aggregate.
 
+**Every octapeptide `*.filtered.cmprsd.xtc` carries a timestamp scaled by
+1000.** This is handled, but `opep` is [out of scope](#scope), so it only
+matters if that archive is ever imported. All 112,756 of them — 95% of the
+`opep` trajectories, ~102 per system —
+hold exactly two frames stamped `100000 ps` and `10100000 ps`, the *same* pair
+in every file of every system. That gap is 1000x the 10 ns `dataset.json`
+declares, which is what an ns→ps conversion using `1e6` instead of `1e3`
+produces (0.1 ns and 10 ns becoming 100000 and 10100000 ps rather than 100 and
+10000). A field identical across 112,756 files is not a per-trajectory clock, so
+**`dataset.json`'s 10 ns is what this importer records.**
+
+The manuscript decides it rather than leaving it to inference. The release holds
+805,608 frames — 5,246 `runNNN` files of 101 frames, 250 of 201, and 112,756
+filtered pairs — and at the declared 10 ns those sum to **8.06 ms, the
+octapeptide total the paper reports**. Read literally, the filtered files alone
+would be 11.3 seconds, ~1400x the published figure. That arithmetic also pins
+the convention `sampled_ns` uses: frames × dt gives 8.06 ms and matches, while
+elapsed spans give 6.87 ms and do not — so the per-simulation figures deposited
+across the 1100 systems sum to the published total.
+
+The 1000x case is recognised narrowly — exactly two frames, and a gap exactly
+that factor off (`is_scaled_stamp()`) — and summarised in a single
+`scaled-frame-stamp` note per system rather than one `frame-spacing-mismatch`
+per file, which would otherwise write 112,756 rows saying the same thing. Any
+*other* disagreement, including a 2-frame file off by some different factor, is
+still reported per file.
+
 That also means mdtraj's silent xdrfile-overflow failure mode (which
 `mdcath_import.py` has to guard against, and re-audit with a `scan` subcommand)
 **cannot arise here**: no `save_xtc` call exists to corrupt anything. There is
@@ -121,21 +179,27 @@ source ~/bioemu-venv/bin/activate     # mdr-process must already be on PATH
 
 ## Usage
 
+> `opep` is [out of scope](#scope). Every command below names the four datasets
+> that are in scope; a bare `init`/`run` would pull it in.
+
 ```bash
-# 1. one-time: build the 23,922-system work-list + the SIFTS UniProt map.
+# 0. the four in-scope datasets, in smallest-first order
+IN_SCOPE=megamerge,cath1,megamut,cath2
+
+# 1. one-time: build the 22,822-system work-list + the SIFTS UniProt map.
 #    Only each zip's central directory is read (a few MB over HTTP range
 #    requests) — no archive is downloaded yet.
-python bioemu_import.py --root /opt/bioemu init
+python bioemu_import.py --root /opt/bioemu init --datasets $IN_SCOPE
 
 # 2. dry-run a single system end-to-end first (no push to MDRepo)
 python bioemu_import.py --root /opt/bioemu run \
     --datasets cath1 --systems cath1_1b43A02 -w 1 --dry-run --keep
 
 # 3. real run against staging, smallest archive first
-python bioemu_import.py --root /opt/bioemu run -s staging -w 4
+python bioemu_import.py --root /opt/bioemu run --datasets $IN_SCOPE -s staging -w 4
 
 # just one dataset (archives are still processed smallest-first within the set)
-python bioemu_import.py --root /opt/bioemu run --datasets opep,cath1 -s prod
+python bioemu_import.py --root /opt/bioemu run --datasets megamerge,cath1 -s prod
 
 # progress / failures / data notes
 python bioemu_import.py --root /opt/bioemu status --show-failures 20
@@ -174,7 +238,7 @@ python bioemu_import.py --root /opt/bioemu reset-sim cath1 cath1_1b43A02
 - `--datasets`, `--systems` — restrict the run (comma-separated, repeatable).
 - `--keep` — don't delete the staged IN_DIR after success (debugging).
 - `--keep-archives` — don't delete an archive once drained (re-runs need no
-  re-download; costs 41 GB steady-state).
+  re-download; costs 39.5 GB steady-state).
 - `--no-verify` — skip the md5 check against Zenodo. Also makes an archive
   *already present* under `<root>/archives/` be used as-is without contacting
   Zenodo at all, which is the escape hatch for a VM that cannot reach it.
@@ -254,7 +318,8 @@ import intent is recorded), so those are ordinary retryable failures.
 MD settings are transcribed from the manuscript SI, not inferred from the files.
 Items marked **⚠** should be confirmed with the authors.
 
-**S.1.4, the standard protocol** (`opep`, `cath1`, `cath2`): TIP3P water, cubic
+**S.1.4, the standard protocol** (`cath1`, `cath2`, and `opep` if ever
+imported): TIP3P water, cubic
 box with 1 nm padding, 0.1 M NaCl. Equilibration 0.1 ns NVT + 0.9 ns NPT with
 restraints on solute heavy atoms, released over 0.1 ns, at 2 fs. **Production
 NPT at 300 K / 1 bar, hydrogen mass repartitioning (4 amu) with h-bond
@@ -306,8 +371,9 @@ padding. Equilibration 0.2 ns NVT + 0.6 ns NPT at 295 K / 1 bar, Langevin, 4 fs.
   equal, so changing one alone fails the suite.
 - **IDs.** `cath1`/`cath2` system names embed a CATH domain
   (`cath1_1b43A02` → PDB `1b43`, chain `A`), so UniProt comes from SIFTS for
-  that exact chain. `opep` peptides are synthetic and get neither field —
-  `mdr-process` is invoked with `--no-id` for those. MegaSim names are MEGAscale
+  that exact chain. (`opep` peptides are synthetic and get neither field —
+  `mdr-process` is invoked with `--no-id` for those — but that path is unused
+  while the dataset is [out of scope](#scope).) MegaSim names are MEGAscale
   entry names: `pdb_id` is taken from the 4-character prefix wherever one exists
   (`1AOY`, `1A0N_L7S`, `2HBB_pross6`, and mutants like `1A0N_L7S__A12D` → `1a0n`),
   with the variant or point mutation stated in the `description`; UniProt is the
@@ -326,10 +392,12 @@ padding. Equilibration 0.2 ns NVT + 0.6 ns NPT at 295 K / 1 bar, Langevin, 4 fs.
    (`openmm.app.ForceField('amber99sbildn.xml').createSystem(...)` →
    `parmed.openmm.load_topology(...).save(psf)`). Test with `extract` plus a
    manual `mdr-process validate` on one system before the full run.
-2. **Large `trajectory_file_names` lists.** Octapeptide systems list ~107
-   trajectory files in a single simulation (`cath2` averages 39). Confirm
-   `mdr-process` handles that on one `opep` system before running the dataset —
-   it has to stat and read every file to sum the duration.
+2. **Large `trajectory_file_names` lists.** With `opep` out of scope this is
+   much reduced — the ~107-file octapeptide simulations were the stress case.
+   `cath2` still averages 39 files per simulation and tops out at 53
+   (`cath2_2vhvA02`), so confirm `mdr-process` handles that on one such system
+   before running the dataset — it has to stat and read every file to sum the
+   duration.
 
 Two smaller ones worth a glance on the first dry-run:
 
@@ -355,12 +423,16 @@ logs/<dataset>__<system>__<group>.log  mdr-process output per simulation
 
 ```bash
 python make_fixtures.py                      # ~3 MB of real members from Zenodo
-python -m pytest test_bioemu_import.py -q     # 95 tests, ~1 min
+python -m pytest test_bioemu_import.py -q     # 111 tests, ~1 min
 ```
 
 The fixtures are small zips assembled from **real** archive members — a real
 GROMACS-written `topology.pdb` and real `.cmprsd.xtc` files — so header walking,
 atom-count checks and force-field splitting run against the actual byte layouts.
+Each dataset's members come from *its own* archive, which matters more than it
+looks: the octapeptide fixture originally stood in cath1 content, and that alone
+kept the 1000x-scaled two-frame stamp — 95% of that archive — out of the suite
+until the first real run hit it.
 The end-to-end tests drive the real worker loop, manifest and locking against a
 stub `mdr-process` that asserts every file the TOML names is present.
 

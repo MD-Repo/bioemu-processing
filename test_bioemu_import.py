@@ -225,6 +225,46 @@ def test_modal_dt_survives_a_minority_of_real_spacings():
     assert bi.modal_dt([500.0] * 20 + [10000.0] * 3) == 500.0
 
 
+def test_scaled_stamp_is_recognised_only_at_exactly_1000x(tmp_path):
+    """The octapeptide stamp, and nothing that merely resembles it.
+
+    Every `.filtered.` file in ONE_octapeptides holds two frames at 100000 and
+    10100000 ps against a declared 10000 ps. Widening this predicate would start
+    swallowing real mis-declarations, so it is pinned to the exact shape.
+    """
+    stamp = bi.xtc_scan(_synth_xtc(tmp_path / "s.xtc", [100000.0, 10100000.0]))
+    assert stamp.ps_per_frame == 10000000.0
+    assert bi.is_scaled_stamp(stamp, 10000.0)
+
+    # Two frames, but off by some other factor — a real disagreement.
+    other = bi.xtc_scan(_synth_xtc(tmp_path / "o.xtc", [0.0, 500.0]))
+    assert not bi.is_scaled_stamp(other, 10000.0)
+
+    # The right factor but not two frames: an aggregate, not the stamp.
+    many = bi.xtc_scan(
+        _synth_xtc(tmp_path / "m.xtc", [i * 1e7 for i in range(6)]))
+    assert not bi.is_scaled_stamp(many, 10000.0)
+
+    # Single-frame files have no spacing at all.
+    one = bi.xtc_scan(_synth_xtc(tmp_path / "1.xtc", [0.0]))
+    assert one.ps_per_frame is None and not bi.is_scaled_stamp(one, 10000.0)
+
+
+def test_real_octapeptide_filtered_file_carries_the_scaled_stamp(tmp_path):
+    """Pinned against the published bytes, not a synthetic stand-in."""
+    with _open("ONE_octapeptides.zip") as zf:
+        p = _extract(zf, "ONE_octapeptides/opep_0000/trajs/"
+                         "e10s1_e8s2p0f150-ADRIA_LARGEPEP_opep_0000-0-1-"
+                         "RND0375_9.filtered.cmprsd.xtc", tmp_path)
+        run = _extract(zf, "ONE_octapeptides/opep_0000/trajs/"
+                           "run001_protein.cmprsd.xtc", tmp_path)
+    info = bi.xtc_scan(p)
+    assert info.n_frames == 2 and info.ps_per_frame == 10000000.0
+    assert bi.is_scaled_stamp(info, 10000.0)
+    # The runNNN files in the same system are the honest ones.
+    assert bi.xtc_scan(run).ps_per_frame == 10000.0
+
+
 def test_xtc_scan_reads_real_frame_headers(tmp_path):
     with _open("ONE_cath1.zip") as zf:
         p = _extract(zf, "ONE_cath1/cath1_1b43A02/trajs/run000_protein.cmprsd.xtc",
@@ -607,6 +647,62 @@ def test_unreadable_and_mismatched_trajectories_are_dropped_not_fatal(tmp_path):
 
     meta = tomllib.loads((built.sim_dir / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
     assert meta["trajectory_file_names"] == ["good.xtc"]
+
+
+def test_scaled_stamp_is_summarised_once_not_noted_per_file(tmp_path):
+    """One note per system, not one per trajectory.
+
+    ~102 of every octapeptide system's trajectories carry the stamp — 112,756
+    across the archive. A note each would bury every other observation in the
+    manifest, so they collapse into a single `scaled-frame-stamp` row and no
+    `frame-spacing-mismatch` is raised for them.
+    """
+    notes = []
+    ds = bi.DATASETS["opep"]
+    with _open("ONE_octapeptides.zip") as zf:
+        sf = bi.index_archive(zf, ds)["opep_0000"]
+        group = bi.discover_groups(zf, sf)[0]
+        built = bi.build_sim_dir(
+            zf, ds, sf, group, bi.parse_system_ids(ds, "opep_0000"), [],
+            tmp_path / "sim", on_note=lambda k, d: notes.append((k, d)))
+
+    assert built.n_trajs == 2                       # nothing is dropped for it
+    assert built.n_frames == 203                    # 2 stamped + 201 honest
+    kinds = [k for k, _ in notes]
+    assert kinds == ["scaled-frame-stamp"]
+    assert "1 of 2 trajectories" in notes[0][1]
+    # The declared spacing is what reaches the deposition, not the stamp.
+    meta = tomllib.loads(
+        (built.sim_dir / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
+    assert "10 ns apart" in meta["description"]
+    assert "10000000" not in meta["description"]
+
+
+def test_a_two_frame_file_off_by_another_factor_is_still_reported(tmp_path):
+    """The summary must not become a blanket amnesty for two-frame files."""
+    notes = []
+    ds = bi.DATASETS["opep"]
+    doctored = tmp_path / "odd.zip"
+    base = "ONE_octapeptides/opep_0000"
+    with zipfile.ZipFile(FIXTURES / "ONE_octapeptides.zip") as z:
+        filtered = next(n for n in z.namelist() if n.endswith(".filtered.cmprsd.xtc"))
+        # The real stamped file with frame 0's time moved up, so the pair sits
+        # 500 ps apart instead of 1000x the declared spacing. Everything else is
+        # the published bytes, compressed coordinate blocks included.
+        odd = bytearray(z.read(filtered))
+        struct.pack_into(">f", odd, 12, 10099500.0)
+        with zipfile.ZipFile(doctored, "w") as dst:
+            for n in z.namelist():
+                dst.writestr(n, bytes(odd) if n == filtered else z.read(n))
+    with zipfile.ZipFile(doctored) as zf:
+        sf = bi.index_archive(zf, ds)["opep_0000"]
+        group = bi.discover_groups(zf, sf)[0]
+        bi.build_sim_dir(zf, ds, sf, group,
+                         bi.parse_system_ids(ds, "opep_0000"), [],
+                         tmp_path / "sim",
+                         on_note=lambda k, d: notes.append((k, d)))
+    assert [k for k, _ in notes] == ["frame-spacing-mismatch"]
+    assert "500 ps apart" in notes[0][1] and ".filtered." in notes[0][1]
 
 
 def test_system_with_no_usable_trajectories_raises_skip(tmp_path):

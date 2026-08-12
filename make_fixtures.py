@@ -43,6 +43,17 @@ MEMBERS = [
     ("megasim_ff14sb.xtc", "15641184", "MSR_megasim_merge.zip",
      "MSR_megasim_merge/HEEH_KT_rd6_0007/trajs/"
      "aggr_trj_run0_clone0_folded_resim.cmprsd.xtc"),
+    # Real octapeptide members. The filtered one matters: 95% of that archive is
+    # two-frame files carrying a timestamp 1000x dataset.json (see the README),
+    # and standing in cath1 content here would hide that shape from the suite
+    # entirely — which is exactly what it did until the first real opep run.
+    ("opep_topology.pdb", "15641199", "ONE_octapeptides.zip",
+     "ONE_octapeptides/opep_0000/topology.pdb"),
+    ("opep_filtered.xtc", "15641199", "ONE_octapeptides.zip",
+     "ONE_octapeptides/opep_0000/trajs/e10s1_e8s2p0f150-ADRIA_LARGEPEP_"
+     "opep_0000-0-1-RND0375_9.filtered.cmprsd.xtc"),
+    ("opep_run001.xtc", "15641199", "ONE_octapeptides.zip",
+     "ONE_octapeptides/opep_0000/trajs/run001_protein.cmprsd.xtc"),
 ]
 
 
@@ -163,15 +174,18 @@ def build(out: Path, m: dict[str, bytes]) -> None:
         z.writestr(f"{base}/topology.pdb", m["megasim_topology.pdb"])
         z.writestr(f"{base}/trajs/trj_mutant_folded.xtc", m["megasim_disp.xtc"])
 
-    # ONE_octapeptides: no PDB or UniProt identifier anywhere.
+    # ONE_octapeptides: no PDB or UniProt identifier anywhere, and both shapes
+    # the archive actually holds — one `runNNN` file whose spacing matches
+    # dataset.json, and one `.filtered.` file with the 1000x-scaled two-frame
+    # stamp that 112,756 of its trajectories carry.
     with zipfile.ZipFile(out / "ONE_octapeptides.zip", "w", zipfile.ZIP_DEFLATED) as z:
         base = "ONE_octapeptides/opep_0000"
         z.writestr(f"{base}/dataset.json",
                    dataset_json(base, "amber ff99sb-ildn", 300.0))
-        z.writestr(f"{base}/topology.pdb", m["cath1_topology.pdb"])
+        z.writestr(f"{base}/topology.pdb", m["opep_topology.pdb"])
         z.writestr(f"{base}/trajs/e10s1_e8s2p0f150-ADRIA_LARGEPEP_opep_0000-0-1-"
-                   f"RND0375_9.filtered.cmprsd.xtc", m["cath1_rep0.xtc"])
-        z.writestr(f"{base}/trajs/run002_protein.cmprsd.xtc", m["cath1_run000.xtc"])
+                   f"RND0375_9.filtered.cmprsd.xtc", m["opep_filtered.xtc"])
+        z.writestr(f"{base}/trajs/run001_protein.cmprsd.xtc", m["opep_run001.xtc"])
 
     # Trajectories that must be dropped rather than deposited: not an xtc at
     # all, truncated mid-frame, and one whose atom count does not match the

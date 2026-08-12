@@ -1202,6 +1202,35 @@ def modal_dt(diffs: list[float]) -> Optional[float]:
     return statistics.median(max(buckets.values(), key=len))
 
 
+# Every one of ONE_octapeptides' 112,756 `*.filtered.cmprsd.xtc` files holds
+# exactly two frames stamped with the same pair of times — 100000 ps and
+# 10100000 ps — in every system of the release. That gap is exactly 1000x the
+# 10 ns dataset.json declares, which is the signature of an ns->ps conversion
+# done with 1e6 instead of 1e3: 0.1 ns and 10 ns written as 100000 and 10100000
+# ps rather than 100 and 10000. A field that is bit-identical across 112,756
+# files is not recording a per-trajectory clock, so dataset.json is the
+# authority here and the stamp is what gets discarded.
+#
+# The manuscript settles it rather than leaving it inferred. The release holds
+# 805,608 frames (5246 run files x 101, 250 x 201, 112,756 filtered x 2); at the
+# declared 10 ns those sum to 8.06 ms, the octapeptide total the paper reports.
+# Read literally the filtered files alone would be 11.3 seconds, ~1400x the
+# published figure. The same arithmetic pins the convention `sampled_ns` uses:
+# frames x dt gives 8.06 ms and matches, elapsed spans give 6.87 ms and do not.
+#
+# Recognition is deliberately narrow — exactly two frames, and a gap that is
+# exactly this factor off — so every other disagreement still surfaces per file.
+SCALED_STAMP_FACTOR = 1000.0
+
+
+def is_scaled_stamp(info: XtcInfo, expected_ps: float) -> bool:
+    """True for the released 1000x-scaled two-frame timestamp (see above)."""
+    if info.n_frames != 2 or info.ps_per_frame is None:
+        return False
+    scaled = expected_ps * SCALED_STAMP_FACTOR
+    return abs(info.ps_per_frame - scaled) <= max(1.0, 0.01 * scaled)
+
+
 def xtc_scan(path: Path) -> XtcInfo:
     """Walk every frame header of an xtc. Raises BadTrajectoryError on garbage."""
     n_atoms = None
@@ -1580,7 +1609,9 @@ def build_sim_dir(zf: zipfile.ZipFile, ds: Dataset, sf: SystemFiles, group: Grou
 
     traj_names: list[str] = []
     dropped: list[tuple[str, str]] = []
+    scaled_stamp: list[str] = []
     total_frames = 0
+    expected_ps = group.save_traj_ns * 1000.0 if group.save_traj_ns else None
     for member in group.trajs:
         name = member.rsplit("/", 1)[-1]
         dest = sim_dir / name
@@ -1609,14 +1640,21 @@ def build_sim_dir(zf: zipfile.ZipFile, ds: Dataset, sf: SystemFiles, group: Grou
         # not the mean: aggregated trajectories restart their clock at each
         # segment boundary, and a mean over first..last reads those restarts as
         # a shorter spacing than any frame pair in the file actually has.
-        if info.ps_per_frame is not None and group.save_traj_ns:
-            expected = group.save_traj_ns * 1000.0
-            if abs(info.ps_per_frame - expected) > max(1.0, 0.01 * expected):
-                detail = (f"{name}: frames {info.ps_per_frame:g} ps apart, "
-                          f"dataset.json declares {expected:g} ps")
-                log.warning("[%s/%s] %s", ds.key, system, detail)
-                if on_note:
-                    on_note("frame-spacing-mismatch", detail)
+        if info.ps_per_frame is not None and expected_ps:
+            if abs(info.ps_per_frame - expected_ps) > max(1.0, 0.01 * expected_ps):
+                # The octapeptide release scales this stamp by a constant 1000x
+                # in ~102 of every system's trajectories; noting each one would
+                # write 112,756 rows saying the same thing. It is summarised
+                # once per group below instead, and only when it is exactly
+                # that factor — anything else is still reported per file.
+                if is_scaled_stamp(info, expected_ps):
+                    scaled_stamp.append(name)
+                else:
+                    detail = (f"{name}: frames {info.ps_per_frame:g} ps apart, "
+                              f"dataset.json declares {expected_ps:g} ps")
+                    log.warning("[%s/%s] %s", ds.key, system, detail)
+                    if on_note:
+                        on_note("frame-spacing-mismatch", detail)
         traj_names.append(name)
         total_frames += info.n_frames
 
@@ -1625,6 +1663,19 @@ def build_sim_dir(zf: zipfile.ZipFile, ds: Dataset, sf: SystemFiles, group: Grou
             f"{system} [{group.slug}]: no usable trajectories"
             + (f" ({len(dropped)} dropped)" if dropped else "")
         )
+
+    if scaled_stamp and expected_ps:
+        detail = (
+            f"{len(scaled_stamp)} of {len(traj_names)} trajectories carry the "
+            f"released two-frame stamp {SCALED_STAMP_FACTOR:g}x the declared "
+            f"spacing ({expected_ps * SCALED_STAMP_FACTOR:g} ps apart against "
+            f"dataset.json's {expected_ps:g} ps); dataset.json is recorded, "
+            f"since the same frames at the declared spacing reproduce the "
+            f"published total simulation time and the stamp does not"
+        )
+        log.info("[%s/%s] %s", ds.key, system, detail)
+        if on_note:
+            on_note("scaled-frame-stamp", detail)
 
     meta = render_metadata(
         ds, system, group, ids, uniprot_ids, traj_names,
