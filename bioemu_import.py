@@ -208,8 +208,11 @@ SOFTWARE_NAME = "CUSTOM"
 SOFTWARE_VERSION = "NA"
 ENGINE_NAME = "OpenMM"
 
-# Cited in every `description` as the provenance of the generated .psf topology.
+# Cited in every `description` as the provenance of the generated .psf topology
+# (bare, so it reads as prose) and linked from every `external_links` (with a
+# scheme, which the spec's url field requires).
 PROCESSING_REPO = "github.com/MD-Repo/bioemu-processing"
+PROCESSING_REPO_URL = f"https://{PROCESSING_REPO}"
 
 # S.1.4: production uses hydrogen mass repartitioning (H = 4 amu) with h-bond
 # constraints at a 4 fs timestep. (Equilibration ran at 2 fs; MDRepo records the
@@ -1547,6 +1550,10 @@ def render_metadata(ds: Dataset, system: str, group: Group, ids: SystemIds,
         "[[external_links]]",
         f"url = {toml_str(BIOEMU_REPO_URL)}",
         'label = "BioEmu model and inference code (GitHub)"',
+        "",
+        "[[external_links]]",
+        f"url = {toml_str(PROCESSING_REPO_URL)}",
+        'label = "MDRepo BioEmu processing scripts (GitHub)"',
         "",
     ]
 

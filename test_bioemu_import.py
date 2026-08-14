@@ -476,6 +476,23 @@ def test_papers_carry_every_required_field():
         assert isinstance(paper["volume"], int)
 
 
+def test_external_links_cite_source_model_and_processing_scripts():
+    """Every entry gets three links: where the data came from, the model that
+    motivated it, and the scripts that produced the deposited topology. The
+    processing repo is cited bare in the description but must carry a scheme
+    here, because the spec's url field is a URL rather than prose."""
+    meta = _render("cath1", "cath1_1b43A02")
+    by_url = {ln["url"]: ln["label"] for ln in meta["external_links"]}
+    assert len(by_url) == 3
+    assert all(u.startswith("https://") for u in by_url), by_url
+    assert bi.PROCESSING_REPO_URL in by_url
+    assert by_url[bi.PROCESSING_REPO_URL] == "MDRepo BioEmu processing scripts (GitHub)"
+    assert bi.BIOEMU_REPO_URL in by_url
+    # The Zenodo link is per-dataset, so it must track the record id.
+    assert bi.ZENODO_DOI.format(record=bi.DATASETS["cath1"].record) in by_url
+    assert bi.PROCESSING_REPO in meta["description"]
+
+
 def test_split_group_says_so_in_the_description():
     ds = bi.DATASETS["megamerge"]
     group = bi.Group(slug="ff14sb-295k", force_field="amber ff14sb",
