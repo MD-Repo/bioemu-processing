@@ -169,8 +169,7 @@ reason is recorded in the manifest (`status --show-notes`). If a group loses
 BioEmu ships only `topology.pdb`, and MDRepo does not accept a PDB as topology.
 ParmEd reads the (hydrogen-containing) PDB and writes a matching `<system>.psf`
 with the identical atom set and order. The deposited `description` says so and
-points at this repo (`PROCESSING_REPO`) for the scripts that did it. See
-*verify on the VM* below.
+points at this repo (`PROCESSING_REPO`) for the scripts that did it. See [bioemu_import.py](bioemu_import.py).
 
 ## Setup (on the VM, as exouser)
 
