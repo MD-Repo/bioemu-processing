@@ -132,7 +132,7 @@ DATASETS: dict[str, Dataset] = {
         blurb=(
             "One of 1100 octapeptides sampled to represent peptide equilibrium "
             "ensembles. Trajectories combine the originally published adaptive-"
-            "sampling set with five additional 1 us trajectories generated for "
+            "sampling set with five additional 1 μs trajectories generated for "
             "BioEmu"
         ),
     ),
@@ -154,7 +154,7 @@ DATASETS: dict[str, Dataset] = {
         label="ONE-cath1", si_section="S.1.5.2", ensemble="NPT",
         id_style="cath", protocol="standard",
         blurb=(
-            "One of 50 CATH domains sampled to ~100 us cumulative simulation "
+            "One of 50 CATH domains sampled to ~100 μs cumulative simulation "
             "time each, by adaptive sampling over three epochs seeded from a "
             "reference PDB structure and then by minRMSD clustering of earlier "
             "epochs"
@@ -167,10 +167,10 @@ DATASETS: dict[str, Dataset] = {
         label="MSR-megasim-mutants", si_section="S.1.5.4", ensemble="NVT",
         id_style="megasim", protocol="megasim",
         blurb=(
-            "One of 21458 point mutants of the MEGAscale wild-type domains "
+            "One of 21,458 point mutants of the MEGAscale wild-type domains "
             "(Tsuboyama et al., Nature 2023). Each mutant was seeded from its "
             "wild-type folded conformation with the side chain exchanged and "
-            "energy-minimised, then simulated for 1 us in the folded state"
+            "energy-minimised, then simulated for 1 μs in the folded state"
         ),
     ),
     "cath2": Dataset(
@@ -181,7 +181,7 @@ DATASETS: dict[str, Dataset] = {
         blurb=(
             "One of ~1040 CATH v4.3.0 domains (50-200 residues, contiguous, no "
             "disulfides, coil fraction below 50%) selected for sequence "
-            "coverage and sampled to ~39 us each by adaptive sampling over two "
+            "coverage and sampled to ~39 μs each by adaptive sampling over two "
             "reseeding epochs"
         ),
     ),
@@ -207,6 +207,9 @@ DATASET_ORDER = list(DATASETS)
 SOFTWARE_NAME = "CUSTOM"
 SOFTWARE_VERSION = "NA"
 ENGINE_NAME = "OpenMM"
+
+# Cited in every `description` as the provenance of the generated .psf topology.
+PROCESSING_REPO = "github.com/MD-Repo/bioemu-processing"
 
 # S.1.4: production uses hydrogen mass repartitioning (H = 4 amu) with h-bond
 # constraints at a 4 fs timestep. (Equilibration ran at 2 fs; MDRepo records the
@@ -1369,7 +1372,7 @@ def truncate_short(text: str, limit: int = SHORT_DESCRIPTION_MAX) -> str:
 
 def format_ns(ns: float) -> str:
     if ns >= 1000:
-        return f"{ns / 1000:g} us"
+        return f"{ns / 1000:g} μs"
     return f"{ns:g} ns"
 
 
@@ -1413,12 +1416,12 @@ def render_metadata(ds: Dataset, system: str, group: Group, ids: SystemIds,
 
     desc_parts = [
         f"All-atom molecular dynamics from the BioEmu training data release "
-        f"(Lewis et al., Science 2025), dataset {ds.label}, system "
+        f"(Lewis et al., Science 2025); dataset = {ds.label}; system = "
         f"{ds.zip_root}/{system}.",
         f"{ds.blurb}.",
     ]
     if ident:
-        desc_parts.append(f"This system corresponds to {ident}.")
+        desc_parts.append(f"This entry corresponds to {ident}.")
     summary = PROTOCOL_SUMMARY[ds.protocol].format(
         engine=ENGINE_NAME, ff=ff_label, temp=group.temperature_k,
         dt=INTEGRATION_TIMESTEP_FS,
@@ -1427,11 +1430,11 @@ def render_metadata(ds: Dataset, system: str, group: Group, ids: SystemIds,
     # turning OpenMM into Openmm and a99SB-disp into A99sb-disp.
     desc_parts.append(summary[:1].upper() + summary[1:] + ".")
     desc_parts.append(
-        f"This deposition holds the {len(traj_names)} trajector"
+        f"This entry holds the {len(traj_names)} trajector"
         f"{'y' if len(traj_names) == 1 else 'ies'} produced with {ff_label}: "
         f"{n_frames} frames total, {format_ns(group.save_traj_ns)} apart, "
         f"{format_ns(sampled_ns)} of sampled time, covering the "
-        f"{n_atoms} solute (protein) atoms only (solvent stripped)."
+        f"{n_atoms} (protein) atoms only (solvent stripped)."
     )
     if group.overridden:
         desc_parts.append(
@@ -1442,19 +1445,19 @@ def render_metadata(ds: Dataset, system: str, group: Group, ids: SystemIds,
         )
     if ds.protocol == "megasim":
         desc_parts.append(
-            "Production trajectories were run for 1.5 us per starting structure "
+            "Production trajectories were run for 1.5 μs per starting structure "
             "and the first 500 ns of each was discarded upstream, so the frames "
             "here are the retained portion."
             if ds.key == "megamerge" else
-            "Each mutant was simulated for 1 us in the folded state; an upstream "
+            "Each mutant was simulated for 1 μs in the folded state; an upstream "
             "burn-in period was removed, so the frames here are the retained "
             "portion."
         )
     desc_parts.append(
-        "Trajectory files carry their published names and content unchanged. "
-        "The topology file is a PSF generated from the released topology.pdb "
-        "(connectivity and atom naming only, no force-field parameters), since "
-        "the release ships no topology in a format MDRepo accepts."
+        "MDRepo requires a separate topology file. The dataset was released with no "
+        " topology file, but the MDRepo team used extraction scripts "
+        f"found at {PROCESSING_REPO} to generate a topology file "
+        "(.psf) from the released .pdb file."
     )
     if reference_name:
         desc_parts.append(

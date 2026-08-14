@@ -168,7 +168,9 @@ reason is recorded in the manifest (`status --show-notes`). If a group loses
 
 BioEmu ships only `topology.pdb`, and MDRepo does not accept a PDB as topology.
 ParmEd reads the (hydrogen-containing) PDB and writes a matching `<system>.psf`
-with the identical atom set and order. See *verify on the VM* below.
+with the identical atom set and order. The deposited `description` says so and
+points at this repo (`PROCESSING_REPO`) for the scripts that did it. See
+*verify on the VM* below.
 
 ## Setup (on the VM, as exouser)
 
@@ -406,6 +408,10 @@ Two smaller ones worth a glance on the first dry-run:
    instead.
 4. **`.cmprsd.xtc` double extensions** (`run001_protein.cmprsd.xtc`) — the name
    ends in `.xtc`, so it should satisfy the spec, but it is unusual.
+5. **Non-ASCII `μ`.** Durations are written `1 μs`, not `1 us`, in both
+   `description` and `short_description`. `SHORT_DESCRIPTION_MAX` counts
+   characters, so the 300-char limit is unaffected; confirm `mdr-process`
+   round-trips the UTF-8 on the first dry-run.
 
 ## Layout under `--root`
 
