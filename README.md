@@ -436,9 +436,20 @@ padding. Equilibration 0.2 ns NVT + 0.6 ns NPT at 295 K / 1 bar, Langevin, 4 fs.
   with the variant or point mutation stated in the `description`; UniProt is the
   union across the entry's chains, since a MEGAscale entry names a domain rather
   than a chain. De novo designs (`EEHEE_rd3_0019`, `HEEH_KT_rd6_0007`,
-  `EA_run2_*`) get neither. **Note this deliberately attaches a parent `pdb_id`
-  to ~21.5k mutants whose sequence differs from the deposited entry** — the fold
-  is the parent's, the sequence is not.
+  `EA_run2_*`, `r10_572_TrROS_Hall`) get neither. **Note this deliberately
+  attaches a parent `pdb_id` to ~21.5k mutants whose sequence differs from the
+  deposited entry** — the fold is the parent's, the sequence is not.
+
+  Eight entries invert that order: a version-tagged redesign of a natural
+  structure leads with its tag and puts the code **last** — `v2_6IVS`,
+  `v2K43S_2KVV`, and `v2R14S_R16S_2L3X`, where the code is the third token.
+  Parsed as a prefix these look like designs, which cost all 455 systems built
+  on them (447 mutants plus the 8 wild-types in `megamerge`) both their `pdb_id`
+  and, through it, their UniProt accessions. They resolve to `2hdz`, `2kvv`,
+  `2l3x`, `2lc2`, `2ldm`, `2lxe`, `4uzx` and `6ivs`. Recognition requires *both*
+  a leading `v<digit>` tag and a trailing PDB code, which keeps it off the
+  `r6`/`r7`/`r10`/`r11` TrRosetta designs — they lead with a similar token but
+  end in `_Hall`.
 
 ## ⚠ Two things that can only be verified on the VM
 
@@ -484,7 +495,7 @@ logs/<dataset>__<system>__<group>.log  mdr-process output per simulation
 
 ```bash
 python make_fixtures.py                      # ~3 MB of real members from Zenodo
-python -m pytest test_bioemu_import.py -q     # 118 tests, ~1 min
+python -m pytest test_bioemu_import.py -q     # 125 tests, ~1 min
 ```
 
 The fixtures are small zips assembled from **real** archive members — a real

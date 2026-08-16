@@ -552,10 +552,22 @@ def _fresh_dir(in_dir: Path) -> Path:
 # PDB code with a variant suffix (1A0N_L7S, 2HBB_pross6), a de novo design
 # (EEHEE_rd3_0019, HEEH_KT_rd6_0007), or a mutant of any of those
 # (1A0N_L7S__A12D). Octapeptides are synthetic and carry no identifier at all.
+#
+# Eight entries invert that order. A redesigned version of a natural structure
+# leads with its version tag and puts the PDB code last: v2_6IVS, v2K43S_2KVV,
+# and v2R14S_R16S_2L3X, where the code is the third token rather than the
+# second. Read the usual way the leading token is not a PDB code, so all 455
+# systems built on them (447 mutants plus the 8 wild-types in megamerge) were
+# being filed as de novo designs with no pdb_id — which also cost them their
+# UniProt accessions, since the SIFTS lookup is keyed on the PDB code. No de
+# novo design in the release begins with v<digit>, and the r6/r7/r10/r11
+# TrRosetta designs end in _Hall rather than a code, so requiring both ends
+# keeps this off them.
 # --------------------------------------------------------------------------- #
 
 CATH_SYSTEM_RE = re.compile(r"^cath[12]_(?P<domain>[0-9A-Za-z]{4}[0-9A-Za-z][0-9]{2})$")
 PDB_CODE_RE = re.compile(r"^[1-9][A-Za-z0-9]{3}$")
+VERSION_TAG_RE = re.compile(r"^v[0-9]+")
 
 
 @dataclass(frozen=True)
@@ -582,6 +594,12 @@ def parse_system_ids(ds: Dataset, system: str) -> SystemIds:
         # wild-type's variant tag from the PDB code it derives from.
         parent, _, mutation = system.partition("__")
         head, _, variant = parent.partition("_")
+        if not PDB_CODE_RE.match(head) and VERSION_TAG_RE.match(head):
+            # A version-tagged redesign: the code is the last token, and
+            # everything before it is the variant tag (see above).
+            *tags, tail = parent.split("_")
+            if tags and PDB_CODE_RE.match(tail):
+                head, variant = tail, "_".join(tags)
         if PDB_CODE_RE.match(head):
             # Chainless: MEGAscale entries name a domain, not a chain, so UniProt
             # accessions are taken as the union across the entry's chains.

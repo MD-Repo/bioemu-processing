@@ -59,6 +59,14 @@ def test_cath_system_ids_reject_junk():
     ("EEHEE_rd3_0019", None, None, None, True),          # de novo design
     ("HEEH_KT_rd6_0007", None, None, None, True),        # 4 letters, but not a PDB code
     ("EA_run2_0290_0001", None, None, None, True),
+    # Version-tagged redesigns invert the usual order and put the code last.
+    ("v2_6IVS", "6ivs", None, "v2", False),
+    ("v2K43S_2KVV", "2kvv", None, "v2K43S", False),
+    ("v2R14S_R16S_2L3X", "2l3x", None, "v2R14S_R16S", False),   # code is 3rd
+    ("v2_6IVS__Y46T", "6ivs", "Y46T", "v2", False),
+    # The TrRosetta designs also lead with a letter+digits token, but end in a
+    # name rather than a code, so they must stay designs.
+    ("r10_572_TrROS_Hall", None, None, None, True),
 ])
 def test_megasim_system_ids(system, pdb, mutation, variant, design):
     ids = bi.parse_system_ids(bi.DATASETS["megamerge"], system)
@@ -73,6 +81,32 @@ def test_megasim_mutant_records_its_parent():
     assert ids.parent == "1A0N_L7S"
     # A wild-type is nobody's mutant, so it has no parent to point at.
     assert bi.parse_system_ids(bi.DATASETS["megamerge"], "1A0N_L7S").parent is None
+
+
+def test_version_tagged_redesigns_are_not_filed_as_de_novo():
+    """They derive from a PDB entry, so `design` must be False.
+
+    The distinction is not cosmetic: `design` drives the "a de novo designed
+    sequence with no PDB entry" clause in the deposited description, and a
+    missing pdb_id also costs the entry its UniProt accessions, because the
+    SIFTS lookup is keyed on the PDB code.
+    """
+    for system in ("v2_6IVS", "v2K43S_2KVV", "v2R14S_R16S_2L3X"):
+        ids = bi.parse_system_ids(bi.DATASETS["megamut"], system)
+        assert ids.pdb_id is not None and ids.design is False, system
+    # The mutant of one keeps both the code and its parent.
+    ids = bi.parse_system_ids(bi.DATASETS["megamut"], "v2R14S_R16S_2L3X__D5A")
+    assert ids.pdb_id == "2l3x"
+    assert ids.parent == "v2R14S_R16S_2L3X" and ids.mutation == "D5A"
+
+
+def test_a_version_tag_alone_does_not_invent_a_pdb_code():
+    """The last token still has to look like a code, or nothing is claimed."""
+    ids = bi.parse_system_ids(bi.DATASETS["megamut"], "v2_somedesign")
+    assert ids.pdb_id is None and ids.design is True
+    # A bare version tag with nothing after it.
+    ids = bi.parse_system_ids(bi.DATASETS["megamut"], "v2")
+    assert ids.pdb_id is None and ids.design is True
 
 
 def test_octapeptides_have_no_identifiers():
