@@ -1167,6 +1167,8 @@ def discover_groups(zf: zipfile.ZipFile, sf: SystemFiles) -> list[Group]:
 XTC_MAGIC = 1995
 _XTC_HEADER = struct.Struct(">iiif")     # magic, natoms, step, time
 _XTC_INT = struct.Struct(">i")
+_XTC_TIME = struct.Struct(">f")          # the trailing field of the header
+_XTC_TIME_OFFSET = 12                    # its byte offset within the header
 
 
 class BadTrajectoryError(RuntimeError):
@@ -1237,6 +1239,95 @@ def is_scaled_stamp(info: XtcInfo, expected_ps: float) -> bool:
     return abs(info.ps_per_frame - scaled) <= max(1.0, 0.01 * scaled)
 
 
+# MSR_megasim_mutants_disp_allatom is the mirror image of the octapeptide case
+# above: its frame times are nanosecond values sitting in a field that is
+# picoseconds by the xtc specification, so every file reads 1000x too *short*
+# rather than too long. Three systems spanning the archive (1A0N_L7S__A12D at
+# index 0, 2LYQ__L56C at 10729, v2_6IVS__Y46T at 21457) stamp consecutive frames
+# 10 ps apart against the 10 ns dataset.json declares — a ratio of exactly 0.001
+# — and each ends at t ~= 1000 from a per-system start below it (119.0, 30.0,
+# 30.0). Read as ns those are the paper's 1 us folded-state runs with the
+# upstream burn-in removed, which is what the deposited description already
+# says; read as ps they are 1 ns runs that all inexplicably stop at 1000 ps.
+# The generator left its fingerprints too: the topology carries "CREATED WITH
+# MDTraj", the step field counts frames rather than integration steps, and these
+# are the only trajectories in the release not named *.cmprsd.xtc.
+#
+# Unlike the octapeptide stamp, this one cannot be left to a note. MDRepo derives
+# sampling from the trajectory itself, so depositing these bytes unaltered would
+# publish 21,458 mutants as ~1 ns of sampling and hand anyone who opens a file a
+# time axis 1000x short. The staged copy is corrected before deposit; the archive
+# under <root>/archives is never touched, so a restage always re-derives from the
+# untouched release and the correction is idempotent.
+#
+# Scaling multiplies the absolute stamp rather than rebasing to zero: a nonzero
+# start records how much burn-in was dropped for that mutant, and 119.0 ->
+# 119000 ps keeps it. cath1, cath2 and megamerge were sampled the same way and
+# stamp their spacing correctly, so the trigger is the observed spacing and not
+# the dataset key — an archive that is only partly affected is still handled.
+NS_STAMPED_AS_PS_FACTOR = 1000.0
+
+
+def is_ns_stamped_as_ps(info: XtcInfo, expected_ps: float) -> bool:
+    """True when frame times are ns values in the ps field (see above).
+
+    Deliberately narrow: the spacing has to sit within 1% of exactly this factor
+    below what dataset.json declares. Any other disagreement is left to the
+    per-file mismatch note rather than silently rewritten.
+    """
+    if info.ps_per_frame is None:
+        return False
+    understated = expected_ps / NS_STAMPED_AS_PS_FACTOR
+    return abs(info.ps_per_frame - understated) <= 0.01 * understated
+
+
+def _walk_frames(fh, size: int, name: str):
+    """Yield (offset, natoms, step, time) for each frame header of an open xtc.
+
+    Shared by xtc_scan and rescale_xtc_times so the reader and the writer cannot
+    disagree about where a frame begins. Structural damage raises here; the
+    cross-frame checks (a changing atom count) belong to the caller.
+    """
+    n_frames = 0
+    while True:
+        offset = fh.tell()
+        head = fh.read(_XTC_HEADER.size)
+        if len(head) < _XTC_HEADER.size:
+            return
+        magic, natoms, step, t = _XTC_HEADER.unpack(head)
+        if magic != XTC_MAGIC:
+            raise BadTrajectoryError(
+                f"{name}: bad frame magic {magic} at byte {offset} "
+                f"(frame {n_frames})"
+            )
+        fh.seek(36, os.SEEK_CUR)                       # 3x3 box
+        raw = fh.read(_XTC_INT.size)
+        if len(raw) < _XTC_INT.size:
+            raise BadTrajectoryError(f"{name}: truncated at frame {n_frames}")
+        (lsize,) = _XTC_INT.unpack(raw)
+        if lsize != natoms:
+            raise BadTrajectoryError(
+                f"{name}: coordinate block declares {lsize} atoms, "
+                f"header says {natoms} (frame {n_frames})"
+            )
+        if lsize <= 9:
+            fh.seek(lsize * 3 * 4, os.SEEK_CUR)        # stored as raw floats
+        else:
+            fh.seek(4 + 4 * 6 + 4, os.SEEK_CUR)        # precision, min/max int, smallidx
+            raw = fh.read(_XTC_INT.size)
+            if len(raw) < _XTC_INT.size:
+                raise BadTrajectoryError(f"{name}: truncated at frame {n_frames}")
+            (nbytes,) = _XTC_INT.unpack(raw)
+            if nbytes < 0:
+                raise BadTrajectoryError(
+                    f"{name}: negative block length at frame {n_frames}")
+            fh.seek(nbytes + ((4 - nbytes % 4) % 4), os.SEEK_CUR)
+        if fh.tell() > size:
+            raise BadTrajectoryError(f"{name}: truncated at frame {n_frames}")
+        yield offset, natoms, step, t
+        n_frames += 1
+
+
 def xtc_scan(path: Path) -> XtcInfo:
     """Walk every frame header of an xtc. Raises BadTrajectoryError on garbage."""
     n_atoms = None
@@ -1245,16 +1336,7 @@ def xtc_scan(path: Path) -> XtcInfo:
     diffs: list[float] = []
     size = path.stat().st_size
     with open(path, "rb") as fh:
-        while True:
-            head = fh.read(_XTC_HEADER.size)
-            if len(head) < _XTC_HEADER.size:
-                break
-            magic, natoms, _step, t = _XTC_HEADER.unpack(head)
-            if magic != XTC_MAGIC:
-                raise BadTrajectoryError(
-                    f"{path.name}: bad frame magic {magic} at byte "
-                    f"{fh.tell() - _XTC_HEADER.size} (frame {n_frames})"
-                )
+        for _offset, natoms, _step, t in _walk_frames(fh, size, path.name):
             if n_atoms is None:
                 n_atoms = natoms
             elif natoms != n_atoms:
@@ -1262,31 +1344,6 @@ def xtc_scan(path: Path) -> XtcInfo:
                     f"{path.name}: atom count changes mid-file "
                     f"({n_atoms} -> {natoms} at frame {n_frames})"
                 )
-            fh.seek(36, os.SEEK_CUR)                       # 3x3 box
-            raw = fh.read(_XTC_INT.size)
-            if len(raw) < _XTC_INT.size:
-                raise BadTrajectoryError(f"{path.name}: truncated at frame {n_frames}")
-            (lsize,) = _XTC_INT.unpack(raw)
-            if lsize != natoms:
-                raise BadTrajectoryError(
-                    f"{path.name}: coordinate block declares {lsize} atoms, "
-                    f"header says {natoms} (frame {n_frames})"
-                )
-            if lsize <= 9:
-                fh.seek(lsize * 3 * 4, os.SEEK_CUR)        # stored as raw floats
-            else:
-                fh.seek(4 + 4 * 6 + 4, os.SEEK_CUR)        # precision, min/max int, smallidx
-                raw = fh.read(_XTC_INT.size)
-                if len(raw) < _XTC_INT.size:
-                    raise BadTrajectoryError(
-                        f"{path.name}: truncated at frame {n_frames}")
-                (nbytes,) = _XTC_INT.unpack(raw)
-                if nbytes < 0:
-                    raise BadTrajectoryError(
-                        f"{path.name}: negative block length at frame {n_frames}")
-                fh.seek(nbytes + ((4 - nbytes % 4) % 4), os.SEEK_CUR)
-            if fh.tell() > size:
-                raise BadTrajectoryError(f"{path.name}: truncated at frame {n_frames}")
             if prev_t is not None:
                 diffs.append(t - prev_t)
             prev_t = t
@@ -1296,6 +1353,25 @@ def xtc_scan(path: Path) -> XtcInfo:
         raise BadTrajectoryError(f"{path.name}: no readable frames")
     return XtcInfo(n_atoms=n_atoms, n_frames=n_frames,
                    ps_per_frame=modal_dt(diffs))
+
+
+def rescale_xtc_times(path: Path, factor: float) -> int:
+    """Multiply every frame's time stamp in place. Returns the frames touched.
+
+    Only the 4-byte big-endian float at offset 12 of each frame header is
+    rewritten. No frame changes length and no coordinate block is read, let alone
+    re-encoded, so the file stays byte-identical to the release everywhere except
+    the time field. Offsets are collected before any write so the walk is never
+    reading a file it is concurrently seeking around in.
+    """
+    size = path.stat().st_size
+    with open(path, "r+b") as fh:
+        stamps = [(offset, t) for offset, _n, _s, t in
+                  _walk_frames(fh, size, path.name)]
+        for offset, t in stamps:
+            fh.seek(offset + _XTC_TIME_OFFSET)
+            fh.write(_XTC_TIME.pack(t * factor))
+    return len(stamps)
 
 
 def pdb_atom_count(path: Path) -> int:
@@ -1402,7 +1478,8 @@ def render_metadata(ds: Dataset, system: str, group: Group, ids: SystemIds,
                     uniprot_ids: list[str], traj_names: list[str],
                     pdb_name: str, psf_name: str, n_atoms: int, n_frames: int,
                     reference_name: Optional[str] = None,
-                    dropped: Optional[list[tuple[str, str]]] = None) -> str:
+                    dropped: Optional[list[tuple[str, str]]] = None,
+                    rescaled: Optional[list[str]] = None) -> str:
     ff = FORCEFIELDS.get(group.force_field)
     ff_label = ff.label if ff else group.force_field
     ff_comments = ff.comments if ff else ""
@@ -1456,9 +1533,21 @@ def render_metadata(ds: Dataset, system: str, group: Group, ids: SystemIds,
             "burn-in period was removed, so the frames here are the retained "
             "portion."
         )
+    if rescaled:
+        desc_parts.append(
+            "Note: the released trajectories carry frame times in nanoseconds, "
+            "in a field the xtc format defines as picoseconds, which understates "
+            f"the sampling interval by a factor of {NS_STAMPED_AS_PS_FACTOR:g}. "
+            "Every frame time in the deposited copies has been multiplied by "
+            f"{NS_STAMPED_AS_PS_FACTOR:g} so the time axis agrees with the "
+            f"{format_ns(group.save_traj_ns)} spacing the release declares and "
+            "with the simulated duration reported in the paper. Coordinates are "
+            "untouched and remain byte-identical to the release; see "
+            f"{PROCESSING_REPO} for the script that applied the correction."
+        )
     desc_parts.append(
         "MDRepo requires a separate topology file. The dataset was released with no "
-        " topology file, but the MDRepo team used extraction scripts "
+        "topology file, but the MDRepo team used extraction scripts "
         f"found at {PROCESSING_REPO} to generate a topology file "
         "(.psf) from the released .pdb file."
     )
@@ -1620,6 +1709,7 @@ def build_sim_dir(zf: zipfile.ZipFile, ds: Dataset, sf: SystemFiles, group: Grou
     traj_names: list[str] = []
     dropped: list[tuple[str, str]] = []
     scaled_stamp: list[str] = []
+    rescaled: list[str] = []
     total_frames = 0
     expected_ps = group.save_traj_ns * 1000.0 if group.save_traj_ns else None
     for member in group.trajs:
@@ -1643,6 +1733,17 @@ def build_sim_dir(zf: zipfile.ZipFile, ds: Dataset, sf: SystemFiles, group: Grou
             if on_note:
                 on_note("atom-count-mismatch", f"{name}: {why}")
             continue
+        # Nanosecond stamps in the picosecond field are corrected on the staged
+        # copy before anything downstream reads it, and the info is re-derived
+        # from the corrected bytes so the spacing check below sees the truth.
+        # See NS_STAMPED_AS_PS_FACTOR for why this one is rewritten rather than
+        # merely noted.
+        if expected_ps and is_ns_stamped_as_ps(info, expected_ps):
+            touched = rescale_xtc_times(dest, NS_STAMPED_AS_PS_FACTOR)
+            info = xtc_scan(dest)
+            log.info("[%s/%s] %s: rescaled %d frame times by %gx",
+                     ds.key, system, name, touched, NS_STAMPED_AS_PS_FACTOR)
+            rescaled.append(name)
         # The published frame spacing should match dataset.json. MDRepo derives
         # sampling from the file itself, so a disagreement is recorded rather
         # than corrected — the file is the authority, dataset.json is the claim.
@@ -1687,10 +1788,27 @@ def build_sim_dir(zf: zipfile.ZipFile, ds: Dataset, sf: SystemFiles, group: Grou
         if on_note:
             on_note("scaled-frame-stamp", detail)
 
+    if rescaled and expected_ps:
+        detail = (
+            f"{len(rescaled)} of {len(traj_names)} trajectories carried frame "
+            f"times {NS_STAMPED_AS_PS_FACTOR:g}x short — nanosecond values in "
+            f"the picosecond field "
+            f"({expected_ps / NS_STAMPED_AS_PS_FACTOR:g} ps apart against "
+            f"dataset.json's {expected_ps:g} ps); the staged copy was corrected "
+            f"in place by multiplying every frame stamp by "
+            f"{NS_STAMPED_AS_PS_FACTOR:g}, because MDRepo derives sampling from "
+            f"the file and the released stamp would publish the run "
+            f"{NS_STAMPED_AS_PS_FACTOR:g}x short. Coordinates are untouched"
+        )
+        log.info("[%s/%s] %s", ds.key, system, detail)
+        if on_note:
+            on_note("rescaled-frame-times", detail)
+
     meta = render_metadata(
         ds, system, group, ids, uniprot_ids, traj_names,
         pdb_name=pdb_name, psf_name=psf_name, n_atoms=n_pdb_atoms,
         n_frames=total_frames, reference_name=reference_name, dropped=dropped,
+        rescaled=rescaled,
     )
     # encoding is explicit: contributor names carry diacritics, and the locale
     # default is ASCII under LANG=C. TOML is UTF-8 by spec regardless.

@@ -265,6 +265,91 @@ def test_real_octapeptide_filtered_file_carries_the_scaled_stamp(tmp_path):
     assert bi.xtc_scan(run).ps_per_frame == 10000.0
 
 
+def test_ns_stamped_as_ps_is_recognised_only_at_exactly_1000x_short(tmp_path):
+    """The mutant stamp, and nothing that merely resembles it.
+
+    This rewrites bytes rather than recording a note, so the predicate has to be
+    at least as tight as the octapeptide one: a file whose spacing is genuinely
+    mis-declared by some other factor must fall through to the mismatch note.
+    """
+    short = bi.xtc_scan(_synth_xtc(tmp_path / "s.xtc", [i * 10.0 for i in range(9)]))
+    assert short.ps_per_frame == 10.0
+    assert bi.is_ns_stamped_as_ps(short, 10000.0)
+    # The octapeptide predicate must not also claim it; they are opposite signs.
+    assert not bi.is_scaled_stamp(short, 10000.0)
+
+    # Short, but by some other factor — a real disagreement, left to the note.
+    other = bi.xtc_scan(_synth_xtc(tmp_path / "o.xtc", [i * 500.0 for i in range(9)]))
+    assert not bi.is_ns_stamped_as_ps(other, 10000.0)
+
+    # Correctly stamped files must never be touched.
+    ok = bi.xtc_scan(_synth_xtc(tmp_path / "k.xtc", [i * 10000.0 for i in range(9)]))
+    assert not bi.is_ns_stamped_as_ps(ok, 10000.0)
+
+    # The octapeptide stamp is 1000x long, not short; it must not be rescaled.
+    stamp = bi.xtc_scan(_synth_xtc(tmp_path / "p.xtc", [100000.0, 10100000.0]))
+    assert not bi.is_ns_stamped_as_ps(stamp, 10000.0)
+
+    # Single-frame files have no spacing at all.
+    one = bi.xtc_scan(_synth_xtc(tmp_path / "1.xtc", [0.0]))
+    assert one.ps_per_frame is None and not bi.is_ns_stamped_as_ps(one, 10000.0)
+
+
+def test_rescale_rewrites_only_the_time_field(tmp_path):
+    """Coordinates, box, atom count and frame count must survive untouched."""
+    src = _synth_xtc(tmp_path / "a.xtc", [119.0, 129.0, 139.0])
+    before = src.read_bytes()
+    assert bi.rescale_xtc_times(src, bi.NS_STAMPED_AS_PS_FACTOR) == 3
+    after = src.read_bytes()
+
+    assert len(after) == len(before)                 # no frame changes length
+    info = bi.xtc_scan(src)
+    assert info.n_frames == 3 and info.ps_per_frame == 10000.0
+    # Every differing byte lies inside a frame's 4-byte time field.
+    with open(src, "rb") as fh:
+        allowed = {i for off, _n, _s, _t in bi._walk_frames(fh, len(after), "a.xtc")
+                   for i in range(off + 12, off + 16)}
+    assert {i for i in range(len(after)) if after[i] != before[i]} <= allowed
+    # Multiplied, not rebased: the nonzero start records the burn-in that was
+    # dropped upstream, so it has to scale with everything else.
+    with open(src, "rb") as fh:
+        times = [t for _o, _n, _s, t in bi._walk_frames(fh, len(after), "a.xtc")]
+    assert times == [119000.0, 129000.0, 139000.0]
+
+
+def test_rescale_is_idempotent_through_the_detector(tmp_path):
+    """A restage re-extracts from the archive, but a double pass must be safe."""
+    src = _synth_xtc(tmp_path / "b.xtc", [i * 10.0 for i in range(9)])
+    assert bi.is_ns_stamped_as_ps(bi.xtc_scan(src), 10000.0)
+    bi.rescale_xtc_times(src, bi.NS_STAMPED_AS_PS_FACTOR)
+    assert not bi.is_ns_stamped_as_ps(bi.xtc_scan(src), 10000.0)
+
+
+def test_real_mutant_trajectory_is_stamped_in_ns(tmp_path):
+    """Pinned against the published bytes of MSR_megasim_mutants_disp_allatom.
+
+    Sampled across the real archive (systems 0, 10729 and 21457) every mutant
+    stamps 10 ps against a declared 10 ns and ends at t~=1000, which is a 1 us
+    folded-state run with the burn-in removed only if those values are ns.
+    """
+    with _open("MSR_megasim_mutants_disp_allatom.zip") as zf:
+        p = _extract(zf, "MSR_megasim_mutants_disp_allatom/1A0N_L7S__A12D/"
+                         "trajs/trj_mutant_folded.xtc", tmp_path)
+    info = bi.xtc_scan(p)
+    assert info.n_atoms == 899 and info.n_frames == 89
+    assert info.ps_per_frame == 10.0
+    assert bi.is_ns_stamped_as_ps(info, 10000.0)
+
+    assert bi.rescale_xtc_times(p, bi.NS_STAMPED_AS_PS_FACTOR) == 89
+    fixed = bi.xtc_scan(p)
+    assert fixed.ps_per_frame == 10000.0
+    assert fixed.n_frames == 89 and fixed.n_atoms == 899
+    with open(p, "rb") as fh:
+        times = [t for _o, _n, _s, t in bi._walk_frames(fh, p.stat().st_size, p.name)]
+    # 119 ns of burn-in dropped, running out to the paper's 1 us.
+    assert times[0] == 119000.0 and times[-1] == 999000.0
+
+
 def test_xtc_scan_reads_real_frame_headers(tmp_path):
     with _open("ONE_cath1.zip") as zf:
         p = _extract(zf, "ONE_cath1/cath1_1b43A02/trajs/run000_protein.cmprsd.xtc",
@@ -693,6 +778,67 @@ def test_scaled_stamp_is_summarised_once_not_noted_per_file(tmp_path):
         (built.sim_dir / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
     assert "10 ns apart" in meta["description"]
     assert "10000000" not in meta["description"]
+
+
+def test_mutant_frame_times_are_corrected_on_the_staged_copy(tmp_path):
+    """The deposited trajectory carries a corrected time axis, and says so.
+
+    MDRepo derives sampling from the file, so unlike the octapeptide stamp this
+    one cannot be left to a note: the bytes reaching deposition have to agree
+    with the 10 ns dataset.json declares.
+    """
+    notes = []
+    ds = bi.DATASETS["megamut"]
+    system = "1A0N_L7S__A12D"
+    with _open("MSR_megasim_mutants_disp_allatom.zip") as zf:
+        sf = bi.index_archive(zf, ds)[system]
+        group = bi.discover_groups(zf, sf)[0]
+        built = bi.build_sim_dir(
+            zf, ds, sf, group, bi.parse_system_ids(ds, system), [],
+            tmp_path / "sim", on_note=lambda k, d: notes.append((k, d)))
+
+    assert built.n_trajs == 1 and built.n_frames == 89
+    # One note about the correction, and no mismatch note: the corrected file
+    # agrees with dataset.json, so nothing is left to disagree about.
+    assert [k for k, _ in notes] == ["rescaled-frame-times"]
+    assert "1 of 1 trajectories" in notes[0][1]
+
+    staged = bi.xtc_scan(built.sim_dir / "trj_mutant_folded.xtc")
+    assert staged.ps_per_frame == 10000.0
+    assert staged.n_frames == 89 and staged.n_atoms == 899
+
+    meta = tomllib.loads(
+        (built.sim_dir / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
+    assert "10 ns apart" in meta["description"]
+    assert "890 ns of sampled time" in meta["description"]
+    # The alteration is declared rather than silent.
+    assert "multiplied by 1000" in meta["description"]
+    assert "byte-identical" in meta["description"]
+
+
+def test_correctly_stamped_archives_are_left_alone(tmp_path):
+    """cath1 and megamerge stamp their spacing correctly and must not be rewritten."""
+    for archive, ds_key, system, traj in (
+        ("ONE_cath1.zip", "cath1", "cath1_1b43A02", "run000_protein.cmprsd.xtc"),
+        ("MSR_megasim_merge.zip", "megamerge", "1A0N_L7S",
+         "aggr_trj_reseed_run5.cmprsd.xtc"),
+    ):
+        notes = []
+        ds = bi.DATASETS[ds_key]
+        with _open(archive) as zf:
+            sf = bi.index_archive(zf, ds)[system]
+            group = bi.discover_groups(zf, sf)[0]
+            source = zf.read(f"{ds.zip_root}/{system}/trajs/{traj}")
+            built = bi.build_sim_dir(
+                zf, ds, sf, group, bi.parse_system_ids(ds, system), [],
+                tmp_path / f"sim_{ds_key}",
+                on_note=lambda k, d: notes.append((k, d)))
+        assert "rescaled-frame-times" not in [k for k, _ in notes]
+        # Byte-for-byte deposition still holds for every archive but the mutants.
+        assert (built.sim_dir / traj).read_bytes() == source
+        meta = tomllib.loads(
+            (built.sim_dir / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
+        assert "multiplied by" not in meta["description"]
 
 
 def test_a_two_frame_file_off_by_another_factor_is_still_reported(tmp_path):

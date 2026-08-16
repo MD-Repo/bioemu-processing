@@ -107,11 +107,21 @@ group becomes its own simulation, tagged `ff14sb-295k` / `ff99sb-disp-295k`.
 Depositing them as one simulation would attach a force field to files it did not
 produce; dropping the minority would discard released data.
 
-### Trajectories are deposited byte-for-byte
+### Coordinates are deposited byte-for-byte
 
-Unlike the mdCATH and Dynamic PDB importers, **nothing is re-encoded**. The
-published XTCs carry correct frame times — 10,000 ps between consecutive frames,
-matching `save_traj_ns: 10.0`.
+Unlike the mdCATH and Dynamic PDB importers, **no coordinate block is ever
+re-encoded**. In `cath1`, `cath2` and `megamerge` the published XTCs are
+deposited byte-for-byte, carrying correct frame times — 10,000 ps between
+consecutive frames, matching `save_traj_ns: 10.0`.
+
+**⚠ `megamut` is the exception: its frame times are rewritten before deposit.**
+Every trajectory in `MSR_megasim_mutants_disp_allatom` stamps its frame times in
+*nanoseconds*, in a header field the XTC format defines as picoseconds, so the
+file understates its own sampling interval by 1000x. The importer multiplies
+every frame stamp by 1000 on the staged copy; see
+[the mutant frame times](#megamut-frame-times-are-stamped-in-ns-not-ps) below.
+Only the 4-byte time field of each frame header changes — no frame changes
+length, and the coordinate blocks stay byte-identical to the release.
 
 **⚠ Some released trajectories are aggregates whose clock restarts.** A file's
 frame times are not necessarily monotonic: several cath1 trajectories are
@@ -152,9 +162,55 @@ per file, which would otherwise write 112,756 rows saying the same thing. Any
 *other* disagreement, including a 2-frame file off by some different factor, is
 still reported per file.
 
-That also means mdtraj's silent xdrfile-overflow failure mode (which
-`mdcath_import.py` has to guard against, and re-audit with a `scan` subcommand)
-**cannot arise here**: no `save_xtc` call exists to corrupt anything. There is
+#### `megamut` frame times are stamped in ns, not ps
+
+This is the mirror image of the octapeptide case, and the one place this importer
+alters a released file. Every trajectory in `MSR_megasim_mutants_disp_allatom`
+stamps consecutive frames **10 ps** apart against the **10 ns** its
+`dataset.json` declares — 1000x too *short*, where the octapeptide stamp is 1000x
+too long. Three systems spanning the archive were range-read from Zenodo to
+confirm it:
+
+| System | index | frames | first *t* | last *t* | observed spacing | declared |
+|---|---:|---:|---:|---:|---:|---:|
+| `1A0N_L7S__A12D` | 0 | 89 | 119.0 | 999.0 | 10 ps | 10,000 ps |
+| `2LYQ__L56C` | 10,729 | 97 | 30.0 | 990.0 | 10 ps | 10,000 ps |
+| `v2_6IVS__Y46T` | 21,457 | 97 | 30.0 | 990.0 | 10 ps | 10,000 ps |
+
+The ratio is exactly 0.001 in every case. What settles the direction is the
+*start* and *end*: each file ends at t ≈ 1000 from a per-system start below it.
+Read as ns those are the paper's 1 μs folded-state runs with the upstream burn-in
+removed — which is exactly what the deposited description already says. Read as
+ps they are 1 ns runs that all inexplicably stop at 1000 ps. The generating
+script left corroborating fingerprints: `topology.pdb` carries `REMARK 1 CREATED
+WITH MDTraj`, the `step` field counts frames rather than integration steps
+(GROMACS would write 2,500,000 per 10 ns at 4 fs), and these are the only
+trajectories in the release not named `*.cmprsd.xtc`.
+
+**Why this one is corrected rather than noted.** MDRepo derives sampling from the
+trajectory itself, so depositing these bytes unaltered would publish 21,458
+mutants as ~1 ns of sampling and hand anyone who opens a file a time axis 1000x
+short. The octapeptide stamp could be left alone because that archive is out of
+scope; this one cannot. The correction multiplies the absolute stamp rather than
+rebasing to zero — a nonzero start records how much burn-in was dropped for that
+mutant, and 119.0 → 119,000 ps keeps it.
+
+Only the staged copy under `staging/` is touched; the archive under `archives/`
+is never modified, so a restage always re-derives from the untouched release and
+the operation is idempotent. The trigger is `is_ns_stamped_as_ps()`, which fires
+only when the observed spacing sits within 1% of exactly `save_traj_ns / 1000` —
+it keys on the measured spacing, not the dataset name, so a partly-affected
+archive is still handled and any other disagreement still falls through to a
+per-file `frame-spacing-mismatch`. Each affected system records one
+`rescaled-frame-times` note (`status --show-notes`), and the deposited
+`description` states that the times were multiplied and that coordinates are
+unchanged. `cath1`, `cath2` and `megamerge` were sampled the same way and stamp
+correctly, so nothing in them is rewritten.
+
+mdtraj's silent xdrfile-overflow failure mode (which `mdcath_import.py` has to
+guard against, and re-audit with a `scan` subcommand) **cannot arise here**: no
+`save_xtc` call exists to corrupt anything, and the rescale seeks to a fixed
+offset in each frame header without touching a coordinate block. There is
 consequently no coordinate-rewriting scan in this tool.
 
 Each trajectory is still checked before deposit — its frame headers are walked
@@ -428,16 +484,19 @@ logs/<dataset>__<system>__<group>.log  mdr-process output per simulation
 
 ```bash
 python make_fixtures.py                      # ~3 MB of real members from Zenodo
-python -m pytest test_bioemu_import.py -q     # 111 tests, ~1 min
+python -m pytest test_bioemu_import.py -q     # 118 tests, ~1 min
 ```
 
 The fixtures are small zips assembled from **real** archive members — a real
 GROMACS-written `topology.pdb` and real `.cmprsd.xtc` files — so header walking,
 atom-count checks and force-field splitting run against the actual byte layouts.
 Each dataset's members come from *its own* archive, which matters more than it
-looks: the octapeptide fixture originally stood in cath1 content, and that alone
-kept the 1000x-scaled two-frame stamp — 95% of that archive — out of the suite
-until the first real run hit it.
+looks, and has now cost twice. The octapeptide fixture originally stood in cath1
+content, and that alone kept the 1000x-scaled two-frame stamp — 95% of that
+archive — out of the suite until the first real run hit it. The mutant fixture
+then stood in `megamerge` content, which stamps its frame times *correctly*, so
+the suite actively asserted the opposite of what `megamut` does and hid the
+ns-in-a-ps-field bug the same way. Both now use members from their own archive.
 The end-to-end tests drive the real worker loop, manifest and locking against a
 stub `mdr-process` that asserts every file the TOML names is present.
 

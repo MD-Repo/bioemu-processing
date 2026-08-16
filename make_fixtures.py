@@ -43,6 +43,15 @@ MEMBERS = [
     ("megasim_ff14sb.xtc", "15641184", "MSR_megasim_merge.zip",
      "MSR_megasim_merge/HEEH_KT_rd6_0007/trajs/"
      "aggr_trj_run0_clone0_folded_resim.cmprsd.xtc"),
+    # Real mutant members. These matter for the same reason the octapeptide ones
+    # below do: every trajectory in this archive stamps its frame times in ns
+    # inside the ps field, and standing in megamerge content here hid that from
+    # the suite entirely — megamerge stamps correctly, so the substitution
+    # silently asserted the opposite of what the archive does.
+    ("megamut_topology.pdb", "15641184", "MSR_megasim_mutants_disp_allatom.zip",
+     "MSR_megasim_mutants_disp_allatom/1A0N_L7S__A12D/topology.pdb"),
+    ("megamut_mutant.xtc", "15641184", "MSR_megasim_mutants_disp_allatom.zip",
+     "MSR_megasim_mutants_disp_allatom/1A0N_L7S__A12D/trajs/trj_mutant_folded.xtc"),
     # Real octapeptide members. The filtered one matters: 95% of that archive is
     # two-frame files carrying a timestamp 1000x dataset.json (see the README),
     # and standing in cath1 content here would hide that shape from the suite
@@ -165,14 +174,16 @@ def build(out: Path, m: dict[str, bytes]) -> None:
                 z.writestr(f"{base}/trajs/{stem}.json",
                            dataset_json(base, "amber ff14sb", 295.0))
 
-    # MSR_megasim_mutants: exactly one trajectory per system, 21458 of them.
+    # MSR_megasim_mutants: exactly one trajectory per system, 21458 of them, and
+    # every one of them stamped in ns rather than ps — real bytes, so the suite
+    # sees the 10-ps-against-a-declared-10-ns spacing the importer has to correct.
     with zipfile.ZipFile(out / "MSR_megasim_mutants_disp_allatom.zip", "w",
                          zipfile.ZIP_DEFLATED) as z:
         base = "MSR_megasim_mutants_disp_allatom/1A0N_L7S__A12D"
         z.writestr(f"{base}/dataset.json",
                    dataset_json(base, "amber ff99sb-disp", 295))
-        z.writestr(f"{base}/topology.pdb", m["megasim_topology.pdb"])
-        z.writestr(f"{base}/trajs/trj_mutant_folded.xtc", m["megasim_disp.xtc"])
+        z.writestr(f"{base}/topology.pdb", m["megamut_topology.pdb"])
+        z.writestr(f"{base}/trajs/trj_mutant_folded.xtc", m["megamut_mutant.xtc"])
 
     # ONE_octapeptides: no PDB or UniProt identifier anywhere, and both shapes
     # the archive actually holds — one `runNNN` file whose spacing matches
