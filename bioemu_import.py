@@ -1437,7 +1437,7 @@ def render_metadata(ds: Dataset, system: str, group: Group, ids: SystemIds,
         f"{'y' if len(traj_names) == 1 else 'ies'} produced with {ff_label}: "
         f"{n_frames} frames total, {format_ns(group.save_traj_ns)} apart, "
         f"{format_ns(sampled_ns)} of sampled time, covering the "
-        f"{n_atoms} (protein) atoms only (solvent stripped)."
+        f"{n_atoms} protein atoms only (solvent stripped)."
     )
     if group.overridden:
         desc_parts.append(
