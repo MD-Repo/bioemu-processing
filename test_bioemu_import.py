@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -453,6 +454,37 @@ def test_rendered_metadata_is_valid_toml_with_required_keys():
     assert meta["structure_file_name"].endswith(".pdb")
 
 
+def test_sampled_time_counts_intervals_not_frames():
+    """251 frames 10 ns apart across 2 runs span 249 intervals, not 251.
+
+    Each trajectory opens on its starting structure at t=0, and a seed frame is
+    a configuration rather than sampled time. n_frames is the group total, so
+    the subtraction is once per trajectory: doing it once for the whole group
+    is the same error scaled by however many runs the system holds, which for
+    the adaptive-sampling sets is 100+.
+    """
+    meta = _render("cath1", "cath1_1b43A02")
+    assert ("251 frames total, 10 ns apart, 2.49 μs of sampled time"
+            in meta["description"])
+    assert "2.49 μs of all-atom MD in 2 trajectories" in meta["short_description"]
+
+
+def test_the_same_frames_in_one_trajectory_span_one_more_interval():
+    """The counterpart to the test above: identical frame count, one run, so
+    only one seed frame comes off. Pins the divisor as trajectories, not a flat
+    -1 and not a frame per anything else."""
+    ds = bi.DATASETS["cath1"]
+    text = bi.render_metadata(
+        ds, "cath1_1b43A02",
+        bi.Group(slug="ff99sb-ildn-300k", force_field="amber ff99sb-ildn",
+                 temperature_k=300, save_traj_ns=10.0, trajs=["trajs/a.xtc"]),
+        bi.parse_system_ids(ds, "cath1_1b43A02"), [],
+        traj_names=["a.xtc"], pdb_name="x.pdb", psf_name="x.psf",
+        n_atoms=1002, n_frames=251)
+    assert ("251 frames total, 10 ns apart, 2.5 μs of sampled time"
+            in tomllib.loads(text)["description"])
+
+
 def _orcid_checksum_ok(orcid: str) -> bool:
     """ISO 7064 MOD 11-2, the check-digit scheme ORCID uses."""
     digits = orcid.replace("-", "")
@@ -844,7 +876,8 @@ def test_mutant_frame_times_are_corrected_on_the_staged_copy(tmp_path):
     meta = tomllib.loads(
         (built.sim_dir / "mdrepo-metadata.toml").read_text(encoding="utf-8"))
     assert "10 ns apart" in meta["description"]
-    assert "890 ns of sampled time" in meta["description"]
+    # 89 frames in one trajectory span 88 intervals: the first is the seed.
+    assert "880 ns of sampled time" in meta["description"]
     # The alteration is declared rather than silent.
     assert "multiplied by 1000" in meta["description"]
     assert "byte-identical" in meta["description"]
@@ -996,6 +1029,72 @@ def test_marking_imported_clears_the_ambiguous_state(man):
     man.mark_imported("cath1", "a", "g", "log")
     assert man.ambiguous() == []
     assert man.imported_groups("cath1", "a") == {"g"}
+
+
+def test_recording_an_import_failure_keeps_the_record_ambiguous(man):
+    """The reason is attached to the marker; the marker itself must survive.
+
+    mdr-process inserts the simulation row before it pushes any file, so a
+    non-zero exit does not prove nothing landed and only a human can say.
+    """
+    man.add_systems("cath1", [("a", 1)])
+    man.mark_importing("cath1", "a", "g", "log")
+    man.mark_import_failed("cath1", "a", "g", "process failed (rc=1):\nboom")
+    amb = man.ambiguous()
+    assert len(amb) == 1 and amb[0]["state"] == "importing"
+    assert amb[0]["error"].endswith("boom")
+    assert man.importing_errors("cath1", "a") == {
+        "g": "process failed (rc=1):\nboom"}
+
+
+def test_an_import_failure_is_not_recorded_against_a_settled_record(man):
+    """A group that never reached mark_importing, or that has since been
+    resolved, has no in-flight marker to annotate."""
+    man.add_systems("cath1", [("a", 1)])
+    man.mark_import_failed("cath1", "a", "g", "validate blew up")
+    assert man.ambiguous() == []
+
+    man.mark_importing("cath1", "a", "g", "log")
+    man.mark_imported("cath1", "a", "g", "log")
+    man.mark_import_failed("cath1", "a", "g", "late arrival")
+    assert man.importing_errors("cath1", "a") == {}
+
+
+def test_a_retried_import_starts_without_the_previous_reason(man):
+    man.add_systems("cath1", [("a", 1)])
+    man.mark_importing("cath1", "a", "g", "log")
+    man.mark_import_failed("cath1", "a", "g", "boom")
+    man.mark_importing("cath1", "a", "g", "log")
+    assert man.importing_errors("cath1", "a") == {}
+
+
+def test_a_manifest_predating_the_error_column_is_migrated(tmp_path):
+    """CREATE TABLE IF NOT EXISTS leaves an existing table exactly as it found
+    it, so every column added after first release needs an explicit ALTER."""
+    db = tmp_path / "manifest.sqlite"
+    conn = sqlite3.connect(str(db))
+    conn.execute(                                   # the pre-`error` DDL
+        """CREATE TABLE sims (
+               dataset     TEXT NOT NULL,
+               system      TEXT NOT NULL,
+               grp         TEXT NOT NULL,
+               state       TEXT NOT NULL DEFAULT 'imported',
+               log_path    TEXT,
+               started_at  TEXT,
+               imported_at TEXT,
+               PRIMARY KEY (dataset, system, grp)
+           )"""
+    )
+    conn.commit()
+    conn.close()
+
+    m = bi.Manifest(db)
+    try:
+        m.mark_importing("cath1", "a", "g", "log")
+        m.mark_import_failed("cath1", "a", "g", "boom")
+        assert m.ambiguous()[0]["error"] == "boom"
+    finally:
+        m.close()
 
 
 def test_uniprot_round_trip(man):
@@ -1299,6 +1398,49 @@ def test_a_failed_push_is_left_ambiguous_rather_than_resubmitted(
         assert man.ambiguous()
     finally:
         man.close()
+
+
+def test_a_stranded_import_records_why_and_carries_it_into_the_retry(
+        root, stub_mdr, monkeypatch):
+    """The ambiguity guard fires on every attempt after the first, so unless the
+    original reason is pinned to the group it is the only thing mark_failed ever
+    stores and what actually went wrong survives in the group log alone."""
+    monkeypatch.setenv("STUB_MDR_FAIL", "process")
+    _init(root, "cath1")
+    _run(root, "--mdr-bin", str(stub_mdr), "--breaker-threshold", "0")
+
+    man = bi.Manifest(bi.Layout(root).db)
+    try:
+        assert man.importing_errors("cath1", "cath1_1b43A02").keys() == \
+            {"ff99sb-ildn-300k"}
+        assert "stub failure in process" in man.ambiguous()[0]["error"]
+        # The guard quotes the stranding failure rather than replacing it.
+        err = man.system_row("cath1", "cath1_1b43A02")["error"]
+        assert "resolve-import" in err
+        assert "stub failure in process" in err
+    finally:
+        man.close()
+
+
+def test_keep_retains_the_staged_tree_of_a_failed_system(
+        root, stub_mdr, monkeypatch):
+    """--keep earns its keep on the failure path: a system that failed is the
+    one whose staged inputs someone wants to look at."""
+    monkeypatch.setenv("STUB_MDR_FAIL", "process")
+    _init(root, "cath1")
+    _run(root, "--mdr-bin", str(stub_mdr), "--breaker-threshold", "0", "--keep")
+
+    stage = bi.Layout(root).system_stage("cath1", "cath1_1b43A02")
+    assert (stage / "ff99sb-ildn-300k" / "mdrepo-metadata.toml").is_file()
+
+
+def test_without_keep_a_failed_system_still_reclaims_its_staging(
+        root, stub_mdr, monkeypatch):
+    monkeypatch.setenv("STUB_MDR_FAIL", "process")
+    _init(root, "cath1")
+    _run(root, "--mdr-bin", str(stub_mdr), "--breaker-threshold", "0")
+
+    assert not bi.Layout(root).system_stage("cath1", "cath1_1b43A02").exists()
 
 
 def test_resolve_import_retry_unblocks_a_failed_push(root, stub_mdr, monkeypatch):

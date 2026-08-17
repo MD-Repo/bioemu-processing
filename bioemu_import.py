@@ -650,6 +650,7 @@ class Manifest:
                 log_path    TEXT,
                 started_at  TEXT,
                 imported_at TEXT,
+                error       TEXT,                              -- why an 'importing' row is stuck
                 PRIMARY KEY (dataset, system, grp)
             );
             CREATE TABLE IF NOT EXISTS uniprot (
@@ -677,7 +678,23 @@ class Manifest:
             CREATE INDEX IF NOT EXISTS idx_systems_status ON systems(dataset, status);
             """
         )
+        self._add_missing_columns()
         self.conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Idempotent ALTERs for manifests written before a column existed.
+
+        CREATE TABLE IF NOT EXISTS leaves an older table exactly as it found it,
+        so a manifest from a previous run keeps its original shape and a plain
+        SELECT of a new column raises OperationalError mid-run. Any column added
+        after first release has to be reconciled here as well as in the DDL.
+        """
+        for table, column, decl in (("sims", "error", "TEXT"),):
+            have = {r["name"] for r in
+                    self.conn.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     # ---- population ----
     def add_systems(self, dataset: str, rows: list[tuple[str, int]]) -> int:
@@ -781,14 +798,46 @@ class Manifest:
         ).fetchall()
         return {r["grp"] for r in rows}
 
+    def importing_errors(self, dataset: str, system: str) -> dict[str, str]:
+        """grp -> the failure that stranded it, for groups that recorded one."""
+        rows = self.conn.execute(
+            "SELECT grp, error FROM sims "
+            "WHERE dataset=? AND system=? AND state='importing'",
+            (dataset, system),
+        ).fetchall()
+        return {r["grp"]: r["error"] for r in rows if r["error"]}
+
     def mark_importing(self, dataset: str, system: str, grp: str, log_path: str) -> None:
         self.conn.execute(
             """INSERT INTO sims(dataset, system, grp, state, log_path, started_at, imported_at)
                VALUES (?, ?, ?, 'importing', ?, ?, NULL)
                ON CONFLICT(dataset, system, grp) DO UPDATE SET
                    state='importing', log_path=excluded.log_path,
-                   started_at=excluded.started_at, imported_at=NULL""",
+                   started_at=excluded.started_at, imported_at=NULL,
+                   error=NULL""",
             (dataset, system, grp, log_path, _now()),
+        )
+        self.conn.commit()
+
+    def mark_import_failed(self, dataset: str, system: str, grp: str,
+                           error: str) -> None:
+        """Record why an in-flight import failed. Does NOT clear the marker.
+
+        The row deliberately stays 'importing': mdr-process inserts the
+        simulation row before it pushes any file, so a non-zero exit means
+        either "nothing was created" or "a row exists and the push failed", and
+        nothing visible from here separates the two. Only a human checking
+        MDRepo can, which is what resolve-import is for.
+
+        What this does fix is the reason that human is shown. Without it the
+        next attempt trips the ambiguity guard in process_system and stores its
+        own message on the system row, burying the failure that actually
+        started it -- the real one then survives only in the group log.
+        """
+        self.conn.execute(
+            "UPDATE sims SET error=? WHERE dataset=? AND system=? AND grp=? "
+            "AND state='importing'",
+            (error[-ERROR_TAIL_CHARS:], dataset, system, grp),
         )
         self.conn.commit()
 
@@ -798,7 +847,7 @@ class Manifest:
                VALUES (?, ?, ?, 'imported', ?, NULL, ?)
                ON CONFLICT(dataset, system, grp) DO UPDATE SET
                    state='imported', log_path=excluded.log_path,
-                   imported_at=excluded.imported_at""",
+                   imported_at=excluded.imported_at, error=NULL""",
             (dataset, system, grp, log_path, _now()),
         )
         self.conn.commit()
@@ -1502,7 +1551,13 @@ def render_metadata(ds: Dataset, system: str, group: Group, ids: SystemIds,
     ff_label = ff.label if ff else group.force_field
     ff_comments = ff.comments if ff else ""
     ident = describe_system(ds, system, ids, uniprot_ids)
-    sampled_ns = n_frames * group.save_traj_ns
+    # Frames span intervals, not durations: n frames sampled every dt cover
+    # (n - 1) * dt, because the first frame is the starting structure at t=0.
+    # n_frames is the total across every trajectory in the group and each one
+    # carries its own t=0, so the subtraction is per trajectory -- for the
+    # adaptive-sampling sets, where a system routinely holds 100+ runs, taking
+    # it once would overstate the sampled time by most of a microsecond.
+    sampled_ns = (n_frames - len(traj_names)) * group.save_traj_ns
 
     short = (f"BioEmu {ds.label} {system}: {format_ns(sampled_ns)} of all-atom MD "
              f"in {len(traj_names)} trajector"
@@ -1919,6 +1974,23 @@ def _read_tail(log_path: Path) -> str:
     return ""
 
 
+def format_sim_error(text: Optional[str], indent: str = "    ",
+                     max_lines: int = 4) -> list[str]:
+    """Render a stored sims.error as indented lines for the ambiguity banner.
+
+    The stored text is an mdr-process log tail, so it is multi-line and its
+    first line ("process failed (rc=1):") is a header rather than the reason.
+    Long tails keep their head and their last lines: the reason mdr-process
+    exits on is what it prints last.
+    """
+    if not text:
+        return []
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) > max_lines:
+        lines = lines[:1] + ["..."] + lines[-(max_lines - 2):]
+    return [indent + ln for ln in lines]
+
+
 def run_mdr(argv: list[str], log_path: Path,
             stall_sec: float = STALL_MINUTES * 60,
             max_sec: float = MDR_MAX_HOURS * 3600,
@@ -2040,10 +2112,20 @@ def process_system(cfg: RunConfig, lay: Layout, man: Manifest, ds: Dataset,
                    system: str) -> None:
     importing = man.importing_groups(ds.key, system)
     if importing:
+        # Carry the original failure forward. This guard fires on every retry
+        # after the first, and without the reason attached it would be the only
+        # thing mark_failed ever stores -- the failure that actually stranded
+        # the group would live in the group log alone.
+        why = man.importing_errors(ds.key, system)
+        detail = "".join(
+            f"\n{g} was left importing by:\n"
+            + "\n".join(format_sim_error(why[g]))
+            for g in sorted(importing) if g in why
+        )
         raise RuntimeError(
             f"ambiguous prior import for group(s) {', '.join(sorted(importing))}; "
             f"verify MDRepo, then run `resolve-import {ds.key} {system} GROUP "
-            f"--imported` or `--retry`"
+            f"--imported` or `--retry`" + detail
         )
 
     sf = index.get(system)
@@ -2099,6 +2181,11 @@ def process_system(cfg: RunConfig, lay: Layout, man: Manifest, ds: Dataset,
                     # staging tree would otherwise grow for the whole run.
                     shutil.rmtree(sim_dir, ignore_errors=True)
         except Exception as e:  # noqa: BLE001
+            # Pin the reason to the group while the marker is still fresh. A
+            # no-op unless mark_importing already ran, which is what we want:
+            # a validate-stage failure never reached MDRepo at all.
+            if not cfg.dry_run:
+                man.mark_import_failed(ds.key, system, group.slug, str(e))
             failures.append(f"{group.slug}: {e}")
             if _is_transient_exc(e):
                 transient.append(group.slug)
@@ -2351,12 +2438,18 @@ def worker_loop(cfg: RunConfig, ds_key: str, worker_id: int, stop_evt,
                         # it must not trip the breaker.
                         log.info("[%s/%s] SKIP: %s", ds.key, system, e)
                         man.mark_skipped(ds.key, system, str(e))
-                        shutil.rmtree(lay.system_stage(ds.key, system),
-                                      ignore_errors=True)
+                        if not cfg.keep_on_success:
+                            shutil.rmtree(lay.system_stage(ds.key, system),
+                                          ignore_errors=True)
                         breaker.success()
                     except Exception as e:  # noqa: BLE001
-                        shutil.rmtree(lay.system_stage(ds.key, system),
-                                      ignore_errors=True)
+                        # --keep is honoured here above all: a failed system is
+                        # the one whose staged inputs someone actually wants to
+                        # look at, and reclaiming them first leaves nothing to
+                        # diagnose from but the log tail.
+                        if not cfg.keep_on_success:
+                            shutil.rmtree(lay.system_stage(ds.key, system),
+                                          ignore_errors=True)
                         first = str(e).splitlines()[0] if str(e) else repr(e)
                         if _is_transient_exc(e):
                             # Infrastructure, not this system: requeue without
@@ -2636,6 +2729,8 @@ def cmd_run(args) -> None:
         for r in amb[:10]:
             print(f"  {r['dataset']}/{r['system']} [{r['grp']}]  "
                   f"(since {r['started_at']})")
+            for line in format_sim_error(r["error"]):
+                print(line)
 
     if cfg.only_systems:
         for key in cfg.datasets:
@@ -2742,6 +2837,8 @@ def _print_status(man: Manifest, show_failures: int) -> None:
         for r in amb[:20]:
             print(f"  {r['dataset']}/{r['system']} [{r['grp']}]  "
                   f"(since {r['started_at']})")
+            for line in format_sim_error(r["error"]):
+                print(line)
 
     notes = man.note_rows(limit=0)
     if notes:
@@ -2904,7 +3001,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--limit", type=int, default=0,
                    help="stop after this many systems are attempted per dataset")
     q.add_argument("--keep", action="store_true",
-                   help="do not delete staged files after success")
+                   help="do not delete staged files, on success or failure")
     q.add_argument("--keep-archives", action="store_true",
                    help="do not delete an archive once its systems are drained")
     q.add_argument("--min-free-gb", type=float, default=MIN_FREE_GB)
