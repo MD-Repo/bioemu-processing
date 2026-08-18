@@ -1615,14 +1615,17 @@ def render_metadata(ds: Dataset, system: str, group: Group, ids: SystemIds,
             f"{NS_STAMPED_AS_PS_FACTOR:g} so the time axis agrees with the "
             f"{format_ns(group.save_traj_ns)} spacing the release declares and "
             "with the simulated duration reported in the paper. Coordinates are "
-            "untouched and remain byte-identical to the release; see "
-            f"{PROCESSING_REPO} for the script that applied the correction."
+            "untouched and remain byte-identical to the release."
         )
+    # The processing repo is cited once, here, for everything done to the files:
+    # the rescale note above deliberately leaves the attribution to this sentence.
     desc_parts.append(
         "MDRepo requires a separate topology file. The dataset was released with no "
         "topology file, but the MDRepo team used extraction scripts "
         f"found at {PROCESSING_REPO} to generate a topology file "
-        "(.psf) from the released .pdb file."
+        "(.psf) from the released .pdb file"
+        + ("; the same repository holds the script that applied the frame-time "
+           "correction described above." if rescaled else ".")
     )
     if reference_name:
         desc_parts.append(

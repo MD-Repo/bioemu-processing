@@ -644,6 +644,29 @@ def test_external_links_cite_source_model_and_processing_scripts():
     assert bi.PROCESSING_REPO in meta["description"]
 
 
+def test_description_cites_the_processing_repo_exactly_once():
+    """The topology sentence and the frame-time correction are both the work of
+    the same repo, so the description names it once and covers both."""
+    ds = bi.DATASETS["megamut"]
+    group = bi.Group(slug="ff14sb-295k", force_field="amber ff14sb",
+                     temperature_k=295, save_traj_ns=0.1, trajs=["trajs/a.xtc"])
+    kwargs = dict(traj_names=["a.xtc"], pdb_name="p.pdb", psf_name="p.psf",
+                  n_atoms=728, n_frames=100)
+    plain = tomllib.loads(bi.render_metadata(
+        ds, "1A0N_L7S__A12D", group,
+        bi.parse_system_ids(ds, "1A0N_L7S__A12D"), [], **kwargs))["description"]
+    corrected = tomllib.loads(bi.render_metadata(
+        ds, "1A0N_L7S__A12D", group,
+        bi.parse_system_ids(ds, "1A0N_L7S__A12D"), [],
+        rescaled=["a.xtc"], **kwargs))["description"]
+    assert plain.count(bi.PROCESSING_REPO) == 1
+    assert corrected.count(bi.PROCESSING_REPO) == 1
+    # The correction is still described, and still attributed to the repo.
+    assert "multiplied by" in corrected
+    assert "the same repository holds the script" in corrected
+    assert "the same repository" not in plain
+
+
 def test_split_group_says_so_in_the_description():
     ds = bi.DATASETS["megamerge"]
     group = bi.Group(slug="ff14sb-295k", force_field="amber ff14sb",
